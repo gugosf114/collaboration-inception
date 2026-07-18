@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local Codex state and transcript exports may contain account or conversation data.
+clean-codex-home/
+exports/
+
+# Generated blind-run artifacts remain local; the prompt and harness are tracked.
+experiment/*.log
+experiment/*-answer.md
+experiment/blind-*.md
+experiment/blind-map.json
+experiment/judgment-sheet.md
+experiment/reblind-*/
