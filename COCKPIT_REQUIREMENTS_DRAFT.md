@@ -117,10 +117,10 @@ Relational success also requires the agent to challenge at the right moments, re
 
 ## Immediate sequence
 
-1. Back up this private transcript project to a private destination.
-2. Complete the existing blind A/B judgment before changing the test.
+1. Keep the current George/Sol Codex thread as the canonical lived thread.
+2. Reconnect every new surface to it through resume/app-server.
 3. Freeze the version-one boundary above.
-4. Wire the available steering, streaming, LAV, side-panel, bridge, and CDP primitives into one cockpit flow.
+4. Wire steering, streaming, LAV, side-panel, bridge, and CDP into one cockpit flow.
 5. Use WiM's Play Console filing as the first real end-to-end cockpit task.
 
 ## Official capability references

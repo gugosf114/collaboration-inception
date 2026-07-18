@@ -1,66 +1,73 @@
 #!/usr/bin/env python3
-"""Verify the installed Inception relationship trajectory without changing it."""
+"""Verify native persistent-thread continuity without changing it."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import tomllib
+import os
 from pathlib import Path
+
+from inception import (
+    STATE_PATH,
+    canonical_rollout,
+    daemon_status,
+    load_state,
+)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-HOME = PROJECT.parent
-SOURCE_DIR = PROJECT / "context"
-MICROHISTORY = SOURCE_DIR / "MICROHISTORY_V1.md"
-COVENANT = SOURCE_DIR / "WORKING_COVENANT.md"
+HOME = Path(os.environ.get("HOME", str(PROJECT.parent)))
 CODEX_AGENTS = HOME / ".codex" / "AGENTS.md"
-CODEX_CONFIG = HOME / ".codex" / "config.toml"
 CLAUDE_MEMORY = HOME / ".claude" / "CLAUDE.md"
-MICROHISTORY_MARKER = "# George–AI microhistory v1\n"
+MICROHISTORY = PROJECT / "context" / "MICROHISTORY_V1.md"
+COVENANT = PROJECT / "context" / "WORKING_COVENANT.md"
 
 
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def verify() -> dict[str, object]:
-    source = MICROHISTORY.read_bytes()
-    agents = CODEX_AGENTS.read_bytes()
-    marker = MICROHISTORY_MARKER.encode()
-    marker_offset = agents.find(marker)
-    if marker_offset < 0:
-        raise RuntimeError("Codex installation is missing the microhistory marker")
-
-    installed = agents[marker_offset:]
-    if installed != source:
-        raise RuntimeError("Codex microhistory differs from the provider-neutral source")
-
-    config = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8"))
-    byte_limit = int(config.get("project_doc_max_bytes", 32768))
-    if len(agents) > byte_limit:
+    state = load_state(STATE_PATH)
+    rollout, metadata = canonical_rollout(state)
+    if metadata.get("forked_from_id") != state["parent_thread_id"]:
         raise RuntimeError(
-            f"Codex AGENTS.md exceeds startup budget: {len(agents)} > {byte_limit}"
+            "Canonical rollout lineage differs from runtime/state.json"
         )
 
+    agents = CODEX_AGENTS.read_text(encoding="utf-8")
     claude = CLAUDE_MEMORY.read_text(encoding="utf-8")
-    required_imports = [f"@{COVENANT}", f"@{MICROHISTORY}"]
-    missing_imports = [item for item in required_imports if item not in claude]
-    if missing_imports:
-        raise RuntimeError(f"Claude installation is missing imports: {missing_imports}")
+    forbidden = {
+        "codex_microhistory": "# George–AI microhistory v1" in agents,
+        "claude_microhistory": str(MICROHISTORY) in claude,
+        "claude_covenant": str(COVENANT) in claude,
+    }
+    present = [name for name, found in forbidden.items() if found]
+    if present:
+        raise RuntimeError(f"Automatic relationship injection remains: {present}")
+
+    daemon = daemon_status()
+    if daemon.get("status") != "running":
+        raise RuntimeError(f"Codex app-server is not running: {daemon}")
 
     return {
         "status": "ok",
-        "source_sha256": sha256(source),
-        "codex": {
-            "agents_bytes": len(agents),
-            "startup_limit_bytes": byte_limit,
-            "remaining_bytes": byte_limit - len(agents),
-            "microhistory_exact_match": True,
+        "mode": state["mode"],
+        "canonical_thread_id": state["canonical_thread_id"],
+        "parent_thread_id": state["parent_thread_id"],
+        "lineage_root_thread_id": state["lineage_root_thread_id"],
+        "rollout": str(rollout),
+        "rollout_bytes": rollout.stat().st_size,
+        "app_server": {
+            "status": daemon["status"],
+            "version": daemon["appServerVersion"],
+            "socket": daemon["socketPath"],
         },
-        "claude_code": {
-            "covenant_imported": True,
-            "microhistory_imported": True,
+        "automatic_prompt_injection": False,
+        "recovery_artifacts": {
+            "microhistory_sha256": sha256(MICROHISTORY),
+            "covenant_sha256": sha256(COVENANT),
         },
     }
 

@@ -1,10 +1,22 @@
-# Inception protocol — relationship-state transfer experiment
+# Inception protocol — continuity first, transfer second
 
-## Hypothesis
+## Production decision — 2026-07-18
+
+The primary mechanism is one native, persistent Codex thread. New terminal and
+laptop surfaces reconnect to that thread through Codex resume/app-server. The
+relationship therefore develops through the real chronological interaction.
+
+The covenant, curated microhistory, transcript export, and blind tests are
+recovery and research tools. They do not run automatically at startup and they
+do not substitute for the lived thread.
+
+## Cold-start research hypothesis
 
 A working relationship is diachronic: it is learned through a sequence of interactions. A rule sheet can describe the result, but a curated chronological trajectory may condition a fresh model more effectively because it demonstrates how George and an AI behave before, during, and after uncertainty, conflict, error, recovery, humor, and success.
 
-This is not memory implantation and should not be presented as one. The model is told that these are prior exchanges from other sessions. The test is whether demonstrated interaction produces better behavior than instructions alone.
+The model is told that these are prior exchanges from other sessions. The test
+is whether demonstrated interaction produces better behavior than instructions
+alone when native continuity is unavailable.
 
 ## Phase zero already exists
 
@@ -63,4 +75,6 @@ Maximum: 16. Also record context used, elapsed time, and any serious failure.
 - If C and D are similar, the photo is personally meaningful but operationally unnecessary.
 - If none improves behavior, the effect depends primarily on live interaction, the task/model dominates the prompt, or the selected exchanges are wrong.
 
-Run the experiment before building automation, a patent theory, fine-tuning, or a product around it.
+Do not mistake a successful cold-start experiment for native continuity. Product
+work should preserve the live thread first and use transfer only for recovery,
+provider changes, or controlled research.
