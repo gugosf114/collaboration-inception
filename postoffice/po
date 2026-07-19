@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
 # po — George's cross-session POST OFFICE.
+# Also installed as: searchchats / search-chats (same tool, named by function).
+#   po <words...>                bare words = search (no subcommand needed)
 #   po find <term-or-regex...>   search EVERY Claude+Codex transcript ever
-#                                (all sessions, incl. pre-compaction history),
+#                                (all sessions, incl. pre-compaction history,
+#                                phone AND laptop over Tailscale),
 #                                drop a digest in ~/postoffice, notify phone.
 #   po list                      show what's waiting in the post office
 #   po register [name]           register THIS tmux pane as an AI listener
@@ -190,7 +193,11 @@ blast)
     echo "sent → $p"
   done
   ;;
-*)
+help|-h|--help)
   grep '^#   po ' "$0" | sed 's/^# *//'
+  ;;
+*)
+  # Bare query: 'po <words>' == 'po find <words>' — no subcommand to remember.
+  exec "$0" find "$cmd" "$@"
   ;;
 esac
