@@ -7,8 +7,24 @@ laptop surfaces reconnect to that thread through Codex resume/app-server. The
 relationship therefore develops through the real chronological interaction.
 
 The covenant, curated microhistory, transcript export, and blind tests are
-recovery and research tools. They do not run automatically at startup and they
-do not substitute for the lived thread.
+recovery and research tools. They do not load into every ordinary session or
+substitute for the lived thread.
+
+## Cockpit clarification — 2026-07-19
+
+The supervised cross-provider cockpit keeps native continuity primary but loads
+the covenant and microhistory into both of its persistent endpoints. This is a
+cockpit-specific recovery layer, not the rejected global startup injection.
+
+The reason is operational: Codex can fork the canonical lived lineage, while a
+new Claude endpoint cannot natively inherit a Codex thread. Both providers also
+compact old conversation when their context windows fill. The chronological
+examples therefore preserve the standing relationship calibration—same-horizon
+work, wholehearted advice, low punishment for honest mistakes, volunteered
+ideas, disagreement, repair, and evidence—without claiming the receiving model
+personally lived the examples. Actual cockpit interaction then accumulates in
+each provider's own resumed session, with bounded relevant episodes added from
+the shared cockpit journal.
 
 ## Cold-start research hypothesis
 

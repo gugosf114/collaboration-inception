@@ -52,9 +52,11 @@ class CommandTests(unittest.TestCase):
 
     def test_parses_visible_continuity_controls(self):
         show = MODULE.parse_operator_command("/context")
+        full = MODULE.parse_operator_command("/context full")
         disable = MODULE.parse_operator_command("/context off")
 
         self.assertEqual((show.kind, show.text), ("context", ""))
+        self.assertEqual((full.kind, full.text), ("context", "full"))
         self.assertEqual((disable.kind, disable.text), ("context", "off"))
 
 
@@ -89,13 +91,31 @@ class StateTests(unittest.TestCase):
 
 
 class ContinuityTests(unittest.TestCase):
+    def test_default_lineage_contains_georges_demonstrated_relationship(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = MODULE.ContinuityEngine(
+                MODULE.DEFAULT_COVENANT_PATH,
+                MODULE.DEFAULT_MICROHISTORY_PATH,
+                Path(directory) / "missing.jsonl",
+            )
+
+        self.assertEqual(engine.microhistory_episode_count, 10)
+        self.assertIn("Nick", engine.microhistory)
+        self.assertIn("grandfather", engine.microhistory.lower())
+        self.assertIn("Wholehearted, not certain", engine.covenant)
+
     def test_retrieves_only_relevant_bounded_prior_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            contract_path = base / "contract.md"
+            covenant_path = base / "covenant.md"
+            microhistory_path = base / "microhistory.md"
             journal_path = base / "events.jsonl"
-            contract_path.write_text(
+            covenant_path.write_text(
                 "Tell the truth and inspect failure modes.", encoding="utf-8"
+            )
+            microhistory_path.write_text(
+                "## 1. Wholeheartedness\nGeorge's grandfather example.",
+                encoding="utf-8",
             )
             journal = MODULE.Journal(journal_path)
             journal.append(
@@ -133,7 +153,9 @@ class ContinuityTests(unittest.TestCase):
                 }
             )
 
-            engine = MODULE.ContinuityEngine(contract_path, journal_path)
+            engine = MODULE.ContinuityEngine(
+                covenant_path, microhistory_path, journal_path
+            )
             packet = engine.packet_for("Why might orchid distribution fail?")
 
         self.assertEqual(packet.episode_ids, ("business-turn",))
@@ -145,14 +167,31 @@ class ContinuityTests(unittest.TestCase):
     def test_no_match_means_no_invented_episode(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            contract_path = base / "contract.md"
-            contract_path.write_text("Tell the truth.", encoding="utf-8")
-            engine = MODULE.ContinuityEngine(contract_path, base / "missing.jsonl")
+            covenant_path = base / "covenant.md"
+            microhistory_path = base / "microhistory.md"
+            covenant_path.write_text("Tell the truth.", encoding="utf-8")
+            microhistory_path.write_text(
+                "## 1. Repair\nMistakes are repaired together.", encoding="utf-8"
+            )
+            engine = MODULE.ContinuityEngine(
+                covenant_path, microhistory_path, base / "missing.jsonl"
+            )
 
             packet = engine.packet_for("A completely new subject")
 
         self.assertEqual(packet.episode_count, 0)
         self.assertEqual(packet.wrap("Current question"), "Current question")
+
+    def test_endpoint_relationship_seed_includes_rules_and_lived_examples(self):
+        instructions = MODULE.endpoint_instructions(
+            "WHOLEHEARTED COVENANT", "GRANDFATHER CHRONOLOGY"
+        )
+
+        self.assertIn("WHOLEHEARTED COVENANT", instructions)
+        self.assertIn("GRANDFATHER CHRONOLOGY", instructions)
+        self.assertIn("Do not recite", instructions)
+        self.assertIn("claim you personally lived", instructions)
+        self.assertIn("discussion-only boundary overrides", instructions)
 
 
 class ProtocolParsingTests(unittest.TestCase):
@@ -308,9 +347,14 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
     async def test_both_receive_the_same_automatically_retrieved_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            contract_path = base / "contract.md"
+            covenant_path = base / "covenant.md"
+            microhistory_path = base / "microhistory.md"
             journal_path = base / "events.jsonl"
-            contract_path.write_text("Inspect failure modes.", encoding="utf-8")
+            covenant_path.write_text("Inspect failure modes.", encoding="utf-8")
+            microhistory_path.write_text(
+                "## 1. Wholeheartedness\nThe relationship survives mistakes.",
+                encoding="utf-8",
+            )
             journal = MODULE.Journal(journal_path)
             journal.append(
                 {
@@ -335,7 +379,9 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 codex,
                 claude,
                 journal,
-                continuity=MODULE.ContinuityEngine(contract_path, journal_path),
+                continuity=MODULE.ContinuityEngine(
+                    covenant_path, microhistory_path, journal_path
+                ),
             )
 
             with redirect_stdout(io.StringIO()):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify native persistent-thread continuity without changing it."""
+"""Verify native continuity and the absence of rejected global injection."""
 
 from __future__ import annotations
 
@@ -32,9 +32,7 @@ def verify() -> dict[str, object]:
     state = load_state(STATE_PATH)
     rollout, metadata = canonical_rollout(state)
     if metadata.get("forked_from_id") != state["parent_thread_id"]:
-        raise RuntimeError(
-            "Canonical rollout lineage differs from runtime/state.json"
-        )
+        raise RuntimeError("Canonical rollout lineage differs from runtime/state.json")
 
     agents = CODEX_AGENTS.read_text(encoding="utf-8")
     claude = CLAUDE_MEMORY.read_text(encoding="utf-8")
@@ -45,7 +43,7 @@ def verify() -> dict[str, object]:
     }
     present = [name for name, found in forbidden.items() if found]
     if present:
-        raise RuntimeError(f"Automatic relationship injection remains: {present}")
+        raise RuntimeError(f"Global startup relationship injection remains: {present}")
 
     daemon = daemon_status()
     if daemon.get("status") != "running":
@@ -64,7 +62,7 @@ def verify() -> dict[str, object]:
             "version": daemon["appServerVersion"],
             "socket": daemon["socketPath"],
         },
-        "automatic_prompt_injection": False,
+        "global_startup_relationship_injection": False,
         "recovery_artifacts": {
             "microhistory_sha256": sha256(MICROHISTORY),
             "covenant_sha256": sha256(COVENANT),

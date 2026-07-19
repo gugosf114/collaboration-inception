@@ -33,7 +33,8 @@ DEFAULT_STATE_PATH = PROJECT / "runtime" / "cockpit-state.json"
 DEFAULT_JOURNAL_PATH = PROJECT / "runtime" / "cockpit-events.jsonl"
 DEFAULT_LOCK_PATH = PROJECT / "runtime" / "cockpit.lock"
 DEFAULT_ERROR_LOG = PROJECT / "runtime" / "cockpit-errors.log"
-DEFAULT_CONTRACT_PATH = PROJECT / "continuity" / "SHARED_WORKING_CONTRACT.md"
+DEFAULT_COVENANT_PATH = PROJECT / "context" / "WORKING_COVENANT.md"
+DEFAULT_MICROHISTORY_PATH = PROJECT / "context" / "MICROHISTORY_V1.md"
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -54,7 +55,8 @@ HELP_TEXT = """Commands:
   /pass codex claude      send Codex's last answer to Claude
   /pass SOURCE TARGET NOTE  forward with George's added instruction
   /last [claude|codex]    show the most recent complete answer
-  /context                show the shared contract and last injected evidence
+  /context                show the relationship covenant and continuity status
+  /context full           also show the chronological relationship examples
   /context on|off         enable or disable retrieved evidence for this run
   /sessions               show the persistent pair
   /stop                   interrupt the running turn(s)
@@ -207,22 +209,29 @@ def continuity_terms(text: str) -> set[str]:
     }
 
 
-def load_working_contract(path: Path = DEFAULT_CONTRACT_PATH) -> str:
+def load_context_document(path: Path, label: str, limit: int) -> str:
     try:
-        contract = path.read_text(encoding="utf-8").strip()
+        content = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
-        raise CockpitError(
-            f"Cannot read shared working contract at {path}: {exc}"
-        ) from exc
-    if not contract:
-        raise CockpitError(f"Shared working contract is empty: {path}")
-    if len(contract) > 12_000:
-        raise CockpitError("Shared working contract exceeds the 12,000-character limit")
-    return contract
+        raise CockpitError(f"Cannot read {label} at {path}: {exc}") from exc
+    if not content:
+        raise CockpitError(f"{label.title()} is empty: {path}")
+    if len(content) > limit:
+        raise CockpitError(f"{label.title()} exceeds the {limit:,}-character limit")
+    return content
 
 
-def endpoint_instructions(contract: str) -> str:
-    return f"{DISCUSSION_INSTRUCTIONS}\n\n{contract}"
+def endpoint_instructions(covenant: str, microhistory: str) -> str:
+    return (
+        f"{DISCUSSION_INSTRUCTIONS}\n\n"
+        "The following covenant and chronological examples are durable relationship "
+        "calibration. Infer how George and the agent work together. Do not recite "
+        "them, imitate surface style, or claim you personally lived the examples. "
+        "The cockpit's discussion-only boundary overrides the covenant's general "
+        "action examples. "
+        "Current evidence and George's current words always win.\n\n"
+        f"{covenant}\n\n{microhistory}"
+    )
 
 
 @dataclass(frozen=True)
@@ -248,12 +257,21 @@ class ContinuityPacket:
 
 
 class ContinuityEngine:
-    """Bounded, inspectable retrieval from prior supervised cockpit turns."""
+    """Durable relationship calibration plus bounded cockpit-turn retrieval."""
 
-    def __init__(self, contract_path: Path, journal_path: Path):
-        self.contract_path = contract_path
+    def __init__(
+        self, covenant_path: Path, microhistory_path: Path, journal_path: Path
+    ):
+        self.covenant_path = covenant_path
+        self.microhistory_path = microhistory_path
         self.journal_path = journal_path
-        self.contract = load_working_contract(contract_path)
+        self.covenant = load_context_document(covenant_path, "working covenant", 12_000)
+        self.microhistory = load_context_document(
+            microhistory_path, "relationship microhistory", 24_000
+        )
+        self.microhistory_episode_count = len(
+            re.findall(r"^## \d+\.", self.microhistory, re.MULTILINE)
+        )
         self.enabled = True
 
     def packet_for(self, prompt: str, limit: int = 2) -> ContinuityPacket:
@@ -1001,14 +1019,16 @@ class Broker:
         delivered_prompt = packet.wrap(prompt)
         if self.continuity is not None:
             if not self.continuity.enabled:
-                print("[CONTINUITY] Shared contract active; retrieved evidence is off.")
+                print(
+                    "[CONTINUITY] Relationship lineage active; retrieved evidence is off."
+                )
             else:
                 detail = (
                     f"{packet.episode_count} relevant prior exchange(s)"
                     if packet.episode_count
                     else "no relevant prior exchange"
                 )
-                print(f"[CONTINUITY] Shared contract active; {detail} injected.")
+                print(f"[CONTINUITY] Relationship lineage active; {detail} injected.")
         output = LabeledOutput()
         self.active_agents = set(agents)
         if self.journal:
@@ -1130,8 +1150,10 @@ def parse_operator_command(line: str) -> OperatorCommand:
         return OperatorCommand("last", target=target)
     if name == "context":
         setting = rest.lower()
-        if setting not in {"", "on", "off"}:
-            raise CockpitError("Use /context, /context on, or /context off")
+        if setting not in {"", "full", "on", "off"}:
+            raise CockpitError(
+                "Use /context, /context full, /context on, or /context off"
+            )
         return OperatorCommand("context", text=setting)
     if name in {"sessions", "stop", "help", "quit", "exit"}:
         return OperatorCommand("quit" if name == "exit" else name)
@@ -1169,16 +1191,28 @@ def show_sessions(state: dict[str, Any]) -> None:
     print(f"Working directory: {state.get('cwd')}")
 
 
-def show_context(broker: Broker) -> None:
+def show_context(broker: Broker, full: bool = False) -> None:
     continuity = broker.continuity
     if continuity is None:
         print("Continuity layer: unavailable")
         return
     status = "on" if continuity.enabled else "off for retrieved evidence"
     print(f"Continuity retrieval: {status}")
-    print("\n--- Shared working contract ---")
-    print(continuity.contract)
-    print("--- End shared working contract ---")
+    print("Relationship lineage: active on both endpoints")
+    print(
+        "Chronological calibration: "
+        f"{continuity.microhistory_episode_count} demonstrated exchanges "
+        f"({len(continuity.microhistory):,} characters)"
+    )
+    print("\n--- George–AI working covenant ---")
+    print(continuity.covenant)
+    print("--- End working covenant ---")
+    if full:
+        print("\n--- Chronological relationship microhistory ---")
+        print(continuity.microhistory)
+        print("--- End relationship microhistory ---")
+    else:
+        print("\nUse /context full to inspect the chronological examples.")
     if broker.last_packet.evidence:
         print("\n--- Evidence injected on the last turn ---")
         print(broker.last_packet.evidence)
@@ -1193,8 +1227,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
     show_sessions(state)
     if broker.continuity:
         print(
-            "Continuity: shared contract active; at most two relevant prior "
-            "cockpit exchanges per turn."
+            "Continuity: lived sessions + covenant + chronological relationship "
+            "examples active; at most two relevant prior cockpit exchanges per turn."
         )
     print("\ngeorge> ", end="", flush=True)
 
@@ -1282,8 +1316,10 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     broker.continuity.enabled = False
                     print(
                         "[SYSTEM] Relevant-evidence retrieval is off for this run; "
-                        "the shared working contract remains active."
+                        "the relationship lineage remains active."
                     )
+                elif command.text == "full":
+                    show_context(broker, full=True)
                 else:
                     show_context(broker)
             elif command.kind == "stop":
@@ -1352,7 +1388,18 @@ def parser() -> argparse.ArgumentParser:
         "--error-log", type=Path, default=DEFAULT_ERROR_LOG, help=argparse.SUPPRESS
     )
     result.add_argument(
-        "--contract", type=Path, default=DEFAULT_CONTRACT_PATH, help=argparse.SUPPRESS
+        "--covenant",
+        "--contract",
+        dest="covenant",
+        type=Path,
+        default=DEFAULT_COVENANT_PATH,
+        help=argparse.SUPPRESS,
+    )
+    result.add_argument(
+        "--microhistory",
+        type=Path,
+        default=DEFAULT_MICROHISTORY_PATH,
+        help=argparse.SUPPRESS,
     )
     return result
 
@@ -1374,8 +1421,8 @@ async def async_main(args: argparse.Namespace) -> int:
     state["codex_source_thread_id"] = source
     state["cwd"] = str(cwd)
     store.save()
-    continuity = ContinuityEngine(args.contract, args.journal)
-    instructions = endpoint_instructions(continuity.contract)
+    continuity = ContinuityEngine(args.covenant, args.microhistory, args.journal)
+    instructions = endpoint_instructions(continuity.covenant, continuity.microhistory)
 
     def remember_claude(session_id: str) -> None:
         state["claude_session_id"] = session_id

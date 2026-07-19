@@ -1,9 +1,10 @@
 # Collaboration Inception
 
 This project keeps George and Sol in one continuing Codex relationship thread.
-It does not recreate that relationship from a personality prompt when a terminal
-window closes. It reopens the native thread that contains the actual work,
-jokes, disagreements, mistakes, repairs, and shared references.
+It reopens the native thread that contains the actual work, jokes,
+disagreements, mistakes, repairs, and shared references. A compact covenant and
+chronological microhistory provide recovery calibration underneath that lived
+thread; they are not presented as memories the receiving model personally had.
 
 ## Live continuity runtime
 
@@ -69,20 +70,33 @@ process lock, and diagnostics remain untracked under `runtime/`.
 ### Minimum continuity layer
 
 Every cockpit start automatically resumes the same native Claude and Codex
-sessions and loads `continuity/SHARED_WORKING_CONTRACT.md` into both endpoints.
-The contract carries stable working rules without attempting to imitate a
-personality or replay a large transcript.
+sessions. It also loads the provider-neutral `context/WORKING_COVENANT.md` and
+`context/MICROHISTORY_V1.md` into both endpoints' durable instruction layer.
+The microhistory contains ten actual chronological demonstrations—including
+the Nick and grandfather examples, mistakes, correction, repair, initiative,
+and disagreement—so a provider change or compacted session retains more than a
+sterile preference list. It explicitly forbids claiming those events as the
+receiving model's personal memories or imitating their surface style.
 
 Before a turn, the cockpit searches its own append-only journal for relevant
 prior supervised exchanges. It injects at most two, caps the evidence packet at
 2,400 characters, and gives the identical packet to Claude and Codex. No lexical
 match means no episode is injected. Current words override old evidence.
 
-`/context` shows the exact contract and evidence used on the previous turn.
-`/context off` disables episode retrieval for the current run while leaving the
-shared contract and native session continuity intact; `/context on` restores it.
-This first version learns only from cockpit exchanges. It does not silently
-scan every historical transcript or synthesize permanent traits.
+`/context` shows the exact covenant, relationship-layer status, and evidence
+used on the previous turn. `/context full` also prints the chronological
+microhistory. `/context off` disables episode retrieval for the current run
+while leaving the relationship lineage and native session continuity intact;
+`/context on` restores it. This first version learns new evidence only from
+cockpit exchanges. It does not silently scan every historical transcript or
+synthesize permanent traits.
+
+When a provider approaches its model context limit, its native runtime compacts
+older conversation into a summary and continues the same session. That summary
+is necessarily lossy. The covenant and microhistory live outside the ordinary
+turn history and are attached again whenever the cockpit starts or resumes, so
+the operational relationship does not depend only on what the compactor chose
+to remember.
 
 ## Proof
 
@@ -95,13 +109,15 @@ python3 scripts/verify_runtime_install.py
 
 The verifier checks the canonical rollout's native session metadata, its fork
 lineage, the running app-server, and the absence of automatic microhistory
-injection from global Codex and Claude startup files.
+injection from global Codex and Claude startup files. The cockpit-specific
+relationship layer is deliberate and does not alter ordinary sessions.
 
 ## Recovery and research artifacts
 
-`context/MICROHISTORY_V1.md` and `context/WORKING_COVENANT.md` remain useful as
-disaster-recovery evidence and cold-model research controls. They are not
-automatically loaded into normal sessions.
+`context/MICROHISTORY_V1.md` and `context/WORKING_COVENANT.md` are the
+provider-neutral disaster-recovery source and cold-model research controls.
+They load automatically inside the supervised cockpit, but not into ordinary
+Codex or Claude sessions.
 
 The transcript exporter converts a Codex rollout JSONL into:
 
@@ -168,11 +184,12 @@ the phone's running app-server. The phone continuity path itself is complete.
 
 ## Failure Log — 2026-07-18 (full multi-day session, July 14–18)
 
-- The first Inception implementation repeated the exact rejected idea: it
-  auto-loaded a curated relationship history into Codex and Claude startup
-  files. That described the relationship to cold models instead of preserving
-  the relationship. The hooks were removed and the architecture was replaced
-  with native thread continuity.
+- The first Inception implementation auto-loaded a curated relationship history
+  into every global Codex and Claude startup. That described the relationship
+  to cold models instead of preserving it, so the global hooks were removed and
+  native thread continuity became primary. The later supervised cross-provider
+  cockpit uses the same source only as a bounded recovery layer beneath its two
+  persistent lived sessions; it does not restore the rejected global behavior.
 - The first launcher was installed only in `~/bin`, which this Termux shell did
   not place on `PATH`. The failure was caught by running the real command; the
   launcher was then installed in `$PREFIX/bin` and verified end to end.
