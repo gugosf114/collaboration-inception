@@ -13,3 +13,9 @@ experiment/blind-*.md
 experiment/blind-map.json
 experiment/judgment-sheet.md
 experiment/reblind-*/
+
+# Local cockpit files may contain private conversation text or process state.
+runtime/cockpit-state.json
+runtime/cockpit-events.jsonl
+runtime/cockpit-errors.log
+runtime/cockpit.lock

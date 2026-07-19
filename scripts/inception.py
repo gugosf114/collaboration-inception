@@ -193,6 +193,9 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     subcommands.add_parser("server")
     subcommands.add_parser("pair")
+    subcommands.add_parser(
+        "cockpit", help="open George's supervised live Claude-Codex switchboard"
+    )
     adopt = subcommands.add_parser("adopt")
     adopt.add_argument("thread_id")
     return result
@@ -200,7 +203,11 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    known = {"resume", "fork", "status", "server", "pair", "adopt"}
+    if raw and raw[0] == "cockpit":
+        from cockpit import main as cockpit_main
+
+        return cockpit_main(raw[1:])
+    known = {"resume", "fork", "status", "server", "pair", "adopt", "cockpit"}
     if not raw:
         raw = ["resume"]
     elif raw[0] not in known and not raw[0].startswith("-"):

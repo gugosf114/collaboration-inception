@@ -26,6 +26,45 @@ The managed Codex app-server supplies the later cockpit primitives: durable
 thread ownership, streaming output, live steering, approvals, resume/fork, and
 phone-to-laptop remote control.
 
+## Supervised Claude-Codex cockpit
+
+The first working cockpit slice is a Termux switchboard controlled entirely by
+George. Start it from the directory whose context should be visible to the two
+agents:
+
+```sh
+inception cockpit
+```
+
+The cockpit starts both endpoints itself. Do not start separate Claude and
+Codex terminals for this flow. Codex uses its JSONL app-server; Claude uses its
+streaming JSON input and output. The first run forks the canonical Codex history
+into a persistent cockpit thread and creates a persistent Claude session. Later
+runs resume that same pair.
+
+At the `george>` prompt:
+
+```text
+/both Is this plan sound?
+/claude Critique the risky assumption.
+/codex Check Claude's objection against the requirements.
+/pass claude codex Focus on the second paragraph.
+/pass codex claude
+/stop
+/quit
+```
+
+`both: ...`, `claude: ...`, and `codex: ...` are equivalent natural forms.
+`/both` sends the exact same message to each agent independently; neither sees
+the other's answer. `/pass` is the only cross-agent handoff. After every answer
+the system returns to idle, and no turn advances without George.
+
+The cockpit is discussion-only by construction. Claude starts with all tools
+disabled. Codex uses a read-only sandbox, denies approvals, and receives an
+explicit no-action instruction. Press Ctrl-C or enter `/stop` during a response
+to interrupt it. Local pair state, the append-only conversation journal, the
+process lock, and diagnostics remain untracked under `runtime/`.
+
 ## Proof
 
 Run:
