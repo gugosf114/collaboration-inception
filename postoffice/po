@@ -33,6 +33,7 @@ add_tree /root/.claude/projects
 add_tree /data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.claude/projects
 add_tree /data/data/com.termux/files/home/.claude/projects
 add_tree /data/data/com.termux/files/home/.codex/sessions
+add_tree /data/data/com.termux/files/home/claude-app-archive/chats
 
 cmd="${1:-help}"; shift || true
 
@@ -50,10 +51,10 @@ find)
   total=0; nfiles=0
   for tree in "${TREES[@]}"; do
     # newest files first
-    find "$tree" -name '*.jsonl' -size +0 2>/dev/null | while read -r f; do stat -c "%Y $f" "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2- | while read -r f; do
+    find "$tree" \( -name '*.jsonl' -o -name '*.txt' \) -size +0 2>/dev/null | while read -r f; do stat -c "%Y $f" "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2- | while read -r f; do
       n=$(grep -aic -E "$q" "$f" 2>/dev/null) || n=0
       [ "$n" -gt 0 ] || continue
-      case "$f" in *codex*) tool=codex;; *) tool=claude;; esac
+      case "$f" in *claude-app-archive*) tool=claude-app;; *codex*) tool=codex;; *) tool=claude;; esac
       d=$(stat -c %y "$f" 2>/dev/null | cut -d' ' -f1)
       base=$(basename "$f" .jsonl | cut -c1-14)
       {
