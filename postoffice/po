@@ -49,25 +49,32 @@ find)
     echo
   } > "$out"
   total=0; nfiles=0
-  for tree in "${TREES[@]}"; do
-    # newest files first
-    find "$tree" \( -name '*.jsonl' -o -name '*.txt' \) -size +0 2>/dev/null | while read -r f; do stat -c "%Y $f" "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2- | while read -r f; do
-      n=$(grep -aic -E "$q" "$f" 2>/dev/null) || n=0
-      [ "$n" -gt 0 ] || continue
-      case "$f" in *claude-app-archive*) tool=claude-app;; *codex*) tool=codex;; *) tool=claude;; esac
-      d=$(stat -c %y "$f" 2>/dev/null | cut -d' ' -f1)
-      base=$(basename "$f" .jsonl | cut -c1-14)
-      {
-        echo "## [$tool] $d — session ${base}…  (${n} matching lines)"
-        echo "source: $f"
-        echo '```'
-        grep -aio -E ".{0,90}($q).{0,220}" "$f" 2>/dev/null \
-          | sed -e 's/\\n/ /g' -e 's/\\"/"/g' -e 's/\\t/ /g' \
-          | awk '!seen[substr($0,1,60)]++' | head -5 | cut -c1-320
-        echo '```'
-        echo
-      } >> "$out"
-    done
+  # ONE ripgrep pass finds the matching files across all trees. Was: a grep
+  # spawn per file over every transcript (866 spawns → >10 min on the phone,
+  # never completed). Now ~2s. --hidden --no-ignore so it descends the hidden
+  # .claude/.codex dirs; -a treats the JSONL as text (matches old grep -a).
+  rg -l -a --hidden --no-ignore --no-messages -e "$q" \
+       -g '*.jsonl' -g '*.txt' "${TREES[@]}" 2>/dev/null \
+    | while read -r f; do
+        [ -n "$f" ] || continue
+        printf '%s %s\n' "$(stat -c %Y "$f" 2>/dev/null || echo 0)" "$f"
+      done | sort -rn | cut -d' ' -f2- | while read -r f; do
+    # count + context now run ONLY on the matching files (few), not all 866
+    n=$(grep -aic -E "$q" "$f" 2>/dev/null) || n=0
+    [ "$n" -gt 0 ] || continue
+    case "$f" in *claude-app-archive*) tool=claude-app;; *codex*) tool=codex;; *) tool=claude;; esac
+    d=$(stat -c %y "$f" 2>/dev/null | cut -d' ' -f1)
+    base=$(basename "$f" .jsonl | cut -c1-14)
+    {
+      echo "## [$tool] $d — session ${base}…  (${n} matching lines)"
+      echo "source: $f"
+      echo '```'
+      grep -aio -E ".{0,90}($q).{0,220}" "$f" 2>/dev/null \
+        | sed -e 's/\\n/ /g' -e 's/\\"/"/g' -e 's/\\t/ /g' \
+        | awk '!seen[substr($0,1,60)]++' | head -5 | cut -c1-320
+      echo '```'
+      echo
+    } >> "$out"
   done
   # ---- laptop leg: search laptop Claude+Codex transcripts over Tailscale SSH.
   # Skips silently (with a digest note) when the laptop is unreachable.
