@@ -41,7 +41,7 @@ find)
   out="$PO/$(date +%m%d-%H%M)-${slug}.md"
   {
     echo "# Post office digest — query: $q"
-    echo "_$(date '+%Y-%m-%d %H:%M') — searched all Claude + Codex transcripts_"
+    echo "_$(date '+%Y-%m-%d %H:%M') — searched all Claude + Codex transcripts, phone + laptop_"
     echo
   } > "$out"
   total=0; nfiles=0
@@ -65,6 +65,62 @@ find)
       } >> "$out"
     done
   done
+  # ---- laptop leg: search laptop Claude+Codex transcripts over Tailscale SSH.
+  # Skips silently (with a digest note) when the laptop is unreachable.
+  # Uses the 'laptop' alias from ~/.ssh/config (exists in both proot and
+  # native Termux) — scp cannot parse the spaced Windows username directly.
+  LTMP="C:/Users/georg/AppData/Local/Temp/po-find.ps1"
+  if grep -qs "^Host laptop$" "$HOME/.ssh/config"; then
+    q_ps=$(printf '%s' "$q" | sed "s/'/''/g")
+    ps1=$(mktemp "${TMPDIR:-/tmp}/po-laptop-XXXXXX.ps1")
+    {
+      printf "\$pattern = '%s'\n" "$q_ps"
+      cat <<'PSEOF'
+$outfile = 'C:/Users/georg/AppData/Local/Temp/po-find-out.txt'
+$trees = [ordered]@{
+  'laptop-claude' = 'C:/Users/georg/.claude/projects'
+  'laptop-codex'  = 'C:/Users/georg/.codex/sessions'
+}
+$result = foreach ($kv in $trees.GetEnumerator()) {
+  if (-not (Test-Path $kv.Value)) { continue }
+  Get-ChildItem $kv.Value -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue |
+    Where-Object { $_.Length -gt 0 -and $_.Length -lt 100MB } |
+    Sort-Object LastWriteTime -Descending | ForEach-Object {
+      $m = Select-String -Path $_.FullName -Pattern $pattern -ErrorAction SilentlyContinue
+      if (-not $m) { return }
+      $n = ($m | Measure-Object).Count
+      $d = $_.LastWriteTime.ToString('yyyy-MM-dd')
+      $base = $_.BaseName.Substring(0, [Math]::Min(14, $_.BaseName.Length))
+      "## [$($kv.Key)] $d - session $base...  ($n matching lines)"
+      "source: laptop:$($_.FullName)"
+      '```'
+      $m | Select-Object -First 5 | ForEach-Object {
+        $line = $_.Line -replace '\\n',' ' -replace '\\"','"' -replace '\\t',' '
+        $idx = if ($_.Matches.Count -gt 0) { $_.Matches[0].Index } else { 0 }
+        $start = [Math]::Max(0, [Math]::Min($idx - 90, $line.Length))
+        $len = [Math]::Min(320, $line.Length - $start)
+        if ($len -gt 0) { $line.Substring($start, $len) }
+      }
+      '```'
+      ''
+    }
+}
+$result | Out-File -FilePath $outfile -Encoding utf8
+PSEOF
+    } > "$ps1"
+    if timeout 20 scp -q -o StrictHostKeyChecking=accept-new "$ps1" "laptop:$LTMP" 2>/dev/null \
+       && timeout 240 ssh laptop \
+            "powershell -NoProfile -ExecutionPolicy Bypass -File $LTMP" >/dev/null 2>&1 \
+       && timeout 20 scp -q \
+            "laptop:C:/Users/georg/AppData/Local/Temp/po-find-out.txt" "$ps1.out" 2>/dev/null; then
+      sed '1s/^\xEF\xBB\xBF//' "$ps1.out" | tr -d '\r' >> "$out"
+      rm -f "$ps1.out"
+    else
+      echo "_(laptop unreachable — laptop transcripts not searched this run)_" >> "$out"
+      echo >> "$out"
+    fi
+    rm -f "$ps1"
+  fi
   nfiles=$(grep -c '^## ' "$out" 2>/dev/null || echo 0)
   # Also create a structured, context-safe gather job from the recent indexed
   # sessions. Broad raw grep above remains the cold-archive discovery layer.
@@ -114,7 +170,7 @@ listeners)
     echo "No tmux server running."
     exit 0
   fi
-  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_name}\t#{@po_listener}\t#{pane_current_command}' | awk -F '\t' '$3 == "1" {printf "%s\t%s\t%s\n", $1, $2, $4}'
+  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_name}\t#{@po_listener}\t#{pane_current_command}' +    | awk -F '\t' '$3 == "1" {printf "%s\t%s\t%s\n", $1, $2, $4}'
   ;;
 blast)
   msg="$*"
@@ -123,7 +179,7 @@ blast)
     echo "No tmux server running. Live blast needs registered AI panes."
     exit 1
   fi
-  targets=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_listener}' | awk -F '\t' '$2 == "1" {print $1}')
+  targets=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_listener}' +    | awk -F '\t' '$2 == "1" {print $1}')
   if [ -z "$targets" ]; then
     echo "No registered AI listeners. Inside each intended pane run: po register <name>"
     exit 1
