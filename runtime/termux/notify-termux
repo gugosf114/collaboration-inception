@@ -1,0 +1,29 @@
+#!/data/data/com.termux/files/usr/bin/sh
+
+# Codex passes one JSON payload argument when an agent turn finishes.
+payload=${1:-'{}'}
+
+event=$(printf '%s' "$payload" | jq -r '.type // empty' 2>/dev/null)
+[ -z "$event" ] || [ "$event" = "agent-turn-complete" ] || exit 0
+
+message=$(printf '%s' "$payload" | jq -r '."last-assistant-message" // .last_assistant_message // "Codex finished the current turn."' 2>/dev/null)
+cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)
+
+[ -n "$message" ] || message="Codex finished the current turn."
+message=$(printf '%s' "$message" | tr '\n' ' ' | cut -c 1-500)
+
+title="Codex finished"
+if [ -n "$cwd" ]; then
+  project=${cwd##*/}
+  [ -n "$project" ] && title="Codex finished — $project"
+fi
+
+termux-notification \
+  --id codex-turn-complete \
+  --group codex \
+  --icon check_circle \
+  --priority high \
+  --sound \
+  --vibrate 150 \
+  --title "$title" \
+  --content "$message"

@@ -16,6 +16,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile scripts
-        run: python -m py_compile scripts/*.py
+        run: python -m compileall -q scripts postoffice
       - name: Run tests
         run: python -m unittest discover -s tests -v

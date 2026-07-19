@@ -1,0 +1,40 @@
+personality = "pragmatic"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
+plan_mode_reasoning_effort = "max"
+model_reasoning_summary = "none"
+model_verbosity = "low"
+service_tier = "fast"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+web_search = "live"
+tool_output_token_limit = 4000
+project_doc_max_bytes = 32768
+project_doc_fallback_filenames = []
+file_opener = "none"
+notify = ["/data/data/com.termux/files/home/.codex/bin/notify-termux"]
+
+[features]
+memories = false
+
+[memories]
+generate_memories = false
+use_memories = false
+disable_on_external_context = false
+min_rate_limit_remaining_percent = 5
+
+[projects."/data/data/com.termux/files/home"]
+trust_level = "trusted"
+
+[tui]
+status_line = ["model-with-reasoning", "context-remaining", "current-dir", "git-branch"]
+status_line_use_colors = true
+
+[tui.model_availability_nux]
+"gpt-5.6-sol" = 4
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+
+[plugins."george-shipping-studio@personal"]
+enabled = true

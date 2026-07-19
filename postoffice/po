@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# ============================================================================
+# po — George's cross-session POST OFFICE.
+#   po find <term-or-regex...>   search EVERY Claude+Codex transcript ever
+#                                (all sessions, incl. pre-compaction history),
+#                                drop a digest in ~/postoffice, notify phone.
+#   po list                      show what's waiting in the post office
+#   po register [name]           register THIS tmux pane as an AI listener
+#   po listeners                 show registered AI listeners
+#   po blast <message...>        type one message into registered listeners
+# Works from Termux native AND from inside proot (absolute paths only).
+# ============================================================================
+set -u
+PO=/data/data/com.termux/files/home/postoffice
+mkdir -p "$PO"
+TREES=()
+TREE_KEYS=""
+add_tree() {
+  local tree="$1" key
+  [ -d "$tree" ] || return 0
+  key="$(stat -Lc '%d:%i' "$tree" 2>/dev/null || printf '%s' "$tree")"
+  case " $TREE_KEYS " in *" $key "*) return 0;; esac
+  TREE_KEYS="$TREE_KEYS $key"
+  TREES+=("$tree")
+}
+
+# Prefer the in-proot path when running inside Debian; otherwise use the
+# canonical Termux-side container path. Add native Termux histories too.
+add_tree /root/.claude/projects
+add_tree /data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.claude/projects
+add_tree /data/data/com.termux/files/home/.claude/projects
+add_tree /data/data/com.termux/files/home/.codex/sessions
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+find)
+  q="$*"
+  [ -z "$q" ] && { echo "usage: po find <term-or-regex>"; exit 1; }
+  slug=$(printf '%s' "$q" | tr -c 'a-zA-Z0-9' '-' | cut -c1-36)
+  out="$PO/$(date +%m%d-%H%M)-${slug}.md"
+  {
+    echo "# Post office digest — query: $q"
+    echo "_$(date '+%Y-%m-%d %H:%M') — searched all Claude + Codex transcripts_"
+    echo
+  } > "$out"
+  total=0; nfiles=0
+  for tree in "${TREES[@]}"; do
+    # newest files first
+    find "$tree" -name '*.jsonl' -size +0 2>/dev/null | while read -r f; do stat -c "%Y $f" "$f" 2>/dev/null; done | sort -rn | cut -d' ' -f2- | while read -r f; do
+      n=$(grep -aic -E "$q" "$f" 2>/dev/null) || n=0
+      [ "$n" -gt 0 ] || continue
+      case "$f" in *codex*) tool=codex;; *) tool=claude;; esac
+      d=$(stat -c %y "$f" 2>/dev/null | cut -d' ' -f1)
+      base=$(basename "$f" .jsonl | cut -c1-14)
+      {
+        echo "## [$tool] $d — session ${base}…  (${n} matching lines)"
+        echo "source: $f"
+        echo '```'
+        grep -aio -E ".{0,90}($q).{0,220}" "$f" 2>/dev/null \
+          | sed -e 's/\\n/ /g' -e 's/\\"/"/g' -e 's/\\t/ /g' \
+          | awk '!seen[substr($0,1,60)]++' | head -5 | cut -c1-320
+        echo '```'
+        echo
+      } >> "$out"
+    done
+  done
+  nfiles=$(grep -c '^## ' "$out" 2>/dev/null || echo 0)
+  # Also create a structured, context-safe gather job from the recent indexed
+  # sessions. Broad raw grep above remains the cold-archive discovery layer.
+  gather=/data/data/com.termux/files/home/session-post-office/gather.py
+  if [ -f "$gather" ] && [ -f /data/data/com.termux/files/home/session-post-office/latest/messages.sqlite ]; then
+    gather_log=$(python3 "$gather" "$q" --root /data/data/com.termux/files/home/session-post-office/latest --label "$slug" --limit-per-session 8 2>/dev/null || true)
+    structured=$(printf '%s\n' "$gather_log" | sed -n 's/^Results: //p' | tail -1)
+    if [ -n "$structured" ]; then
+      {
+        echo
+        echo "## Structured recent-session package"
+        echo "$structured"
+      } >> "$out"
+    fi
+  fi
+  echo "---" >> "$out"
+  echo "_${nfiles} sessions matched. Pickup: ${out}_" >> "$out"
+  echo "POST OFFICE: $nfiles sessions matched → $out"
+  command -v termux-notification >/dev/null 2>&1 && \
+    termux-notification --title "📬 Post office: $nfiles sessions matched" \
+      --content "query: $q — digest ready" 2>/dev/null
+  ;;
+list)
+  ls -lt "$PO" 2>/dev/null | head -15
+  ;;
+register)
+  if [ -z "${TMUX_PANE:-}" ]; then
+    echo "Run this inside the tmux pane that will host an AI session."
+    exit 1
+  fi
+  name="${*:-ai-${TMUX_PANE#%}}"
+  tmux set-option -pt "$TMUX_PANE" @po_listener 1
+  tmux set-option -pt "$TMUX_PANE" @po_name "$name"
+  echo "registered $name on $TMUX_PANE"
+  ;;
+unregister)
+  if [ -z "${TMUX_PANE:-}" ]; then
+    echo "Run this inside the registered tmux pane."
+    exit 1
+  fi
+  tmux set-option -pu -t "$TMUX_PANE" @po_listener 2>/dev/null || true
+  tmux set-option -pu -t "$TMUX_PANE" @po_name 2>/dev/null || true
+  echo "unregistered $TMUX_PANE"
+  ;;
+listeners)
+  if ! tmux list-panes -a >/dev/null 2>&1; then
+    echo "No tmux server running."
+    exit 0
+  fi
+  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_name}\t#{@po_listener}\t#{pane_current_command}' | awk -F '\t' '$3 == "1" {printf "%s\t%s\t%s\n", $1, $2, $4}'
+  ;;
+blast)
+  msg="$*"
+  [ -z "$msg" ] && { echo "usage: po blast <message>"; exit 1; }
+  if ! tmux list-panes -a >/dev/null 2>&1; then
+    echo "No tmux server running. Live blast needs registered AI panes."
+    exit 1
+  fi
+  targets=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_listener}' | awk -F '\t' '$2 == "1" {print $1}')
+  if [ -z "$targets" ]; then
+    echo "No registered AI listeners. Inside each intended pane run: po register <name>"
+    exit 1
+  fi
+  printf '%s\n' "$targets" | while read -r p; do
+    tmux send-keys -t "$p" -l "$msg"
+    tmux send-keys -t "$p" Enter
+    echo "sent → $p"
+  done
+  ;;
+*)
+  grep '^#   po ' "$0" | sed 's/^# *//'
+  ;;
+esac

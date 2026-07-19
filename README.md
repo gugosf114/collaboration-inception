@@ -64,3 +64,75 @@ python3 -m unittest discover -s tests -v
 The earlier preserved-history-versus-clean-session experiment remains under
 `experiment/`. It measures cold-start transfer only; it is not the production
 continuity mechanism.
+
+## Session Log — 2026-07-18 (full multi-day session, July 14–18)
+
+This session began as a WiM Play Store and Lavrentiy release push and expanded
+into a complete cross-project cleanup and a durable Codex continuity build.
+
+- WiM gained authenticated backend audio transcription, monthly Play Billing
+  verification and quotas, permanent package identity, account deletion,
+  reviewer access, Play declarations and listing assets, assistive-permission
+  explanations, Script Prep, learning/baseline features, multilingual paths,
+  stable live-state colors, corrected bubble touch geometry, and a stable-signed
+  test APK. Build 8.2 is the current GitHub release and its CI is green.
+- Lavrentiy became a distributable evaluator release rather than an unfinished
+  developer checkout. Version 1.7.1 restores multilingual transcription and UI
+  paths, removes legacy bundled credentials, documents the evaluator workflow
+  and founder context, and is published with green CI and Pages deployment.
+- Bakers Agent and its private commercial platform received the
+  multi-business/operator foundation, photo intake and publishing workflow,
+  commercial controls, and the urgent WiM Firestore rule restoration with a
+  regression test. Old review branches were reconciled, the useful
+  AI-visibility design was preserved, the MIT license was removed, and the
+  source repository is private.
+- The phone-side Codex environment was consolidated around global operating
+  instructions, bounded context handling, transcript search, and one private
+  continuity repository. The native Codex app-server daemon is running and
+  supplies the resume/fork/streaming/steering foundation; remote control is
+  connected.
+- The active Termux Codex operating instructions, optimized configuration, and
+  completion-notification hook are preserved under `runtime/termux` as explicit
+  snapshots. Authentication, model caches, daemon state, and conversation
+  databases remain local.
+- The shared transcript post office was incorporated as the archive/search
+  fallback, while direct Playwright/CDP remained the laptop-browser route. No
+  additional Playwright MCP layer was added. Its collector, SQLite index,
+  search, gather, turn-reader, and `po` command source are now tracked here.
+- The final continuity design uses this exact lived Codex thread. The installed
+  `inception` command reopens thread
+  `019f7048-1bb9-7230-b91f-f572d2cbc870`; six local regression tests and GitHub
+  CI pass. The curated covenant and microhistory remain recovery/research
+  material only.
+
+The remaining cross-device step is the Windows/PowerShell client attachment to
+the phone's running app-server. The phone continuity path itself is complete.
+
+## Failure Log — 2026-07-18 (full multi-day session, July 14–18)
+
+- The first Inception implementation repeated the exact rejected idea: it
+  auto-loaded a curated relationship history into Codex and Claude startup
+  files. That described the relationship to cold models instead of preserving
+  the relationship. The hooks were removed and the architecture was replaced
+  with native thread continuity.
+- The first launcher was installed only in `~/bin`, which this Termux shell did
+  not place on `PATH`. The failure was caught by running the real command; the
+  launcher was then installed in `$PREFIX/bin` and verified end to end.
+- The post-office command had been installed directly in two phone locations
+  without any Git source, and its tmux listener commands contained a stray `+`
+  argument. The source was moved into this private repo, both installed commands
+  now delegate to it, the malformed arguments were removed, and shell/parser
+  regression tests were added.
+- Termux closed while several AI sessions and heavy processes were active. The
+  chats were not lost: native rollout files and transcript archives survived,
+  but the event proved that visible terminal windows are not a continuity
+  mechanism.
+- Parallel sessions repeatedly produced naming confusion, stale conclusions,
+  and cross-project drift. Repository state, commit history, live CI, releases,
+  and deployed state were rechecked before the final claims.
+- A large static microhistory would have consumed every new session's context
+  and still failed to reproduce lived interaction. It is retained solely as a
+  disaster-recovery and controlled-experiment artifact.
+- The app-server and remote-control backend are running, but a Windows client
+  has not yet been attached. Phone continuity was verified; laptop continuity
+  must not be claimed until that endpoint and authentication path are tested.
