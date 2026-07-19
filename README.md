@@ -50,6 +50,7 @@ At the `george>` prompt:
 /codex Check Claude's objection against the requirements.
 /pass claude codex Focus on the second paragraph.
 /pass codex claude
+/context
 /stop
 /quit
 ```
@@ -64,6 +65,24 @@ disabled. Codex uses a read-only sandbox, denies approvals, and receives an
 explicit no-action instruction. Press Ctrl-C or enter `/stop` during a response
 to interrupt it. Local pair state, the append-only conversation journal, the
 process lock, and diagnostics remain untracked under `runtime/`.
+
+### Minimum continuity layer
+
+Every cockpit start automatically resumes the same native Claude and Codex
+sessions and loads `continuity/SHARED_WORKING_CONTRACT.md` into both endpoints.
+The contract carries stable working rules without attempting to imitate a
+personality or replay a large transcript.
+
+Before a turn, the cockpit searches its own append-only journal for relevant
+prior supervised exchanges. It injects at most two, caps the evidence packet at
+2,400 characters, and gives the identical packet to Claude and Codex. No lexical
+match means no episode is injected. Current words override old evidence.
+
+`/context` shows the exact contract and evidence used on the previous turn.
+`/context off` disables episode retrieval for the current run while leaving the
+shared contract and native session continuity intact; `/context on` restores it.
+This first version learns only from cockpit exchanges. It does not silently
+scan every historical transcript or synthesize permanent traits.
 
 ## Proof
 

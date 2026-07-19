@@ -50,6 +50,13 @@ class CommandTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.CockpitError, "/both"):
             MODULE.parse_operator_command("everybody start talking")
 
+    def test_parses_visible_continuity_controls(self):
+        show = MODULE.parse_operator_command("/context")
+        disable = MODULE.parse_operator_command("/context off")
+
+        self.assertEqual((show.kind, show.text), ("context", ""))
+        self.assertEqual((disable.kind, disable.text), ("context", "off"))
+
 
 class StateTests(unittest.TestCase):
     def test_state_round_trip_is_private_and_validated(self):
@@ -81,6 +88,73 @@ class StateTests(unittest.TestCase):
                 MODULE.StateStore(path).load()
 
 
+class ContinuityTests(unittest.TestCase):
+    def test_retrieves_only_relevant_bounded_prior_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            contract_path = base / "contract.md"
+            journal_path = base / "events.jsonl"
+            contract_path.write_text(
+                "Tell the truth and inspect failure modes.", encoding="utf-8"
+            )
+            journal = MODULE.Journal(journal_path)
+            journal.append(
+                {
+                    "type": "prompt",
+                    "turn_id": "business-turn",
+                    "target": "both",
+                    "text": "Assess the orchid business distribution and feasibility.",
+                }
+            )
+            journal.append(
+                {
+                    "type": "answer",
+                    "turn_id": "business-turn",
+                    "agent": "claude",
+                    "status": "completed",
+                    "text": "ORCHID-731 failed when customer acquisition became too expensive.",
+                }
+            )
+            journal.append(
+                {
+                    "type": "prompt",
+                    "turn_id": "theme-turn",
+                    "target": "codex",
+                    "text": "Change the Android theme color.",
+                }
+            )
+            journal.append(
+                {
+                    "type": "answer",
+                    "turn_id": "theme-turn",
+                    "agent": "codex",
+                    "status": "completed",
+                    "text": "Use blue for the toolbar.",
+                }
+            )
+
+            engine = MODULE.ContinuityEngine(contract_path, journal_path)
+            packet = engine.packet_for("Why might orchid distribution fail?")
+
+        self.assertEqual(packet.episode_ids, ("business-turn",))
+        self.assertIn("ORCHID-731", packet.evidence)
+        self.assertNotIn("toolbar", packet.evidence)
+        self.assertLessEqual(len(packet.evidence), 2_400)
+        self.assertIn("George's current message", packet.wrap("Current question"))
+
+    def test_no_match_means_no_invented_episode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            contract_path = base / "contract.md"
+            contract_path.write_text("Tell the truth.", encoding="utf-8")
+            engine = MODULE.ContinuityEngine(contract_path, base / "missing.jsonl")
+
+            packet = engine.packet_for("A completely new subject")
+
+        self.assertEqual(packet.episode_count, 0)
+        self.assertEqual(packet.wrap("Current question"), "Current question")
+
+
 class ProtocolParsingTests(unittest.TestCase):
     def test_extracts_claude_stream_delta_and_completed_message(self):
         delta = {
@@ -107,18 +181,23 @@ class ProtocolParsingTests(unittest.TestCase):
         with patch.dict(
             os.environ, {"PREFIX": "/data/data/com.termux/files/usr"}, clear=False
         ):
-            command = MODULE.default_claude_command(Path("/tmp/work"), CLAUDE_SESSION)
+            command = MODULE.default_claude_command(
+                Path("/tmp/work"), CLAUDE_SESSION, "SHARED CONTRACT TEST"
+            )
 
         self.assertEqual(command[:4], ["proot-distro", "login", "debian", "--"])
         self.assertIn("stream-json", command)
         tools_index = command.index("--tools")
         self.assertEqual(command[tools_index + 1], "")
+        self.assertIn("SHARED CONTRACT TEST", command)
         self.assertEqual(command[-2:], ["--resume", CLAUDE_SESSION])
 
 
 class FakeCodexEndpoint(MODULE.CodexEndpoint):
     def __init__(self):
-        super().__init__(Path("/tmp"), THREAD, None)
+        super().__init__(
+            Path("/tmp"), THREAD, None, instructions="SHARED CONTRACT TEST"
+        )
         self.sent = []
 
     async def _request(self, method, params, timeout=120):
@@ -160,6 +239,7 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(initialize[1]["capabilities"]["experimentalApi"])
             self.assertTrue(resume[1]["excludeTurns"])
+            self.assertEqual(resume[1]["developerInstructions"], "SHARED CONTRACT TEST")
             self.assertEqual(thread_id, THREAD)
             endpoint.error_handle.close()
 
@@ -224,6 +304,46 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Claude's proposal", codex.calls[0])
         self.assertIn("Find the flaw", codex.calls[0])
         self.assertEqual(claude.calls, [])
+
+    async def test_both_receive_the_same_automatically_retrieved_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            contract_path = base / "contract.md"
+            journal_path = base / "events.jsonl"
+            contract_path.write_text("Inspect failure modes.", encoding="utf-8")
+            journal = MODULE.Journal(journal_path)
+            journal.append(
+                {
+                    "type": "prompt",
+                    "turn_id": "orchid-turn",
+                    "target": "both",
+                    "text": "Review orchid distribution.",
+                }
+            )
+            journal.append(
+                {
+                    "type": "answer",
+                    "turn_id": "orchid-turn",
+                    "agent": "codex",
+                    "status": "completed",
+                    "text": "The evidence marker is ORCHID-731.",
+                }
+            )
+            codex = FakeEndpoint("codex")
+            claude = FakeEndpoint("claude")
+            broker = MODULE.Broker(
+                codex,
+                claude,
+                journal,
+                continuity=MODULE.ContinuityEngine(contract_path, journal_path),
+            )
+
+            with redirect_stdout(io.StringIO()):
+                await broker.ask("both", "Reconsider orchid distribution.")
+
+        self.assertEqual(claude.calls, codex.calls)
+        self.assertIn("ORCHID-731", claude.calls[0])
+        self.assertIn("Reconsider orchid distribution.", claude.calls[0])
 
     async def test_stop_interrupts_every_active_endpoint(self):
         codex = SlowEndpoint("codex")
