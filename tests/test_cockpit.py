@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "cockpit.py"
@@ -45,6 +45,29 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(command.source, "claude")
         self.assertEqual(command.target, "codex")
         self.assertEqual(command.text, "focus on the hidden assumption")
+
+    def test_parses_explicit_and_natural_action_grants(self):
+        explicit = MODULE.parse_operator_command(
+            "/act codex implement it, test it, commit it, and push it"
+        )
+        natural = MODULE.parse_operator_command("Claude!: execute your answer now")
+
+        self.assertEqual(
+            (explicit.kind, explicit.target, explicit.text),
+            (
+                "act",
+                "codex",
+                "implement it, test it, commit it, and push it",
+            ),
+        )
+        self.assertEqual(
+            (natural.kind, natural.target, natural.text),
+            ("act", "claude", "execute your answer now"),
+        )
+
+    def test_rejects_action_grant_to_both_agents(self):
+        with self.assertRaisesRegex(MODULE.CockpitError, "/act claude"):
+            MODULE.parse_operator_command("/act both implement it")
 
     def test_rejects_ungated_bare_text(self):
         with self.assertRaisesRegex(MODULE.CockpitError, "/both"):
@@ -191,7 +214,19 @@ class ContinuityTests(unittest.TestCase):
         self.assertIn("GRANDFATHER CHRONOLOGY", instructions)
         self.assertIn("Do not recite", instructions)
         self.assertIn("claim you personally lived", instructions)
-        self.assertIn("discussion-only boundary overrides", instructions)
+        self.assertIn("cockpit mode attached", instructions)
+
+    def test_turn_modes_make_action_and_discussion_boundaries_explicit(self):
+        discussion = MODULE.mode_prompt("compare this", "discussion")
+        work = MODULE.mode_prompt("inspect this", "work")
+        action = MODULE.mode_prompt("ship it", "action")
+
+        self.assertIn("COCKPIT MODE: DISCUSSION", discussion)
+        self.assertIn("read-only", discussion)
+        self.assertIn("COCKPIT MODE: WORK", work)
+        self.assertIn("If he asks for an answer or review only", work)
+        self.assertIn("COCKPIT MODE: ACTION", action)
+        self.assertIn("Perform the requested work now", action)
 
 
 class ProtocolParsingTests(unittest.TestCase):
@@ -216,7 +251,7 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(MODULE.claude_stream_delta(delta), "hello")
         self.assertEqual(MODULE.claude_assistant_text(assistant), "hello George")
 
-    def test_termux_claude_command_is_streaming_and_tool_disabled(self):
+    def test_termux_claude_command_uses_streaming_permission_protocol(self):
         with patch.dict(
             os.environ, {"PREFIX": "/data/data/com.termux/files/usr"}, clear=False
         ):
@@ -227,9 +262,51 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(command[:4], ["proot-distro", "login", "debian", "--"])
         self.assertIn("stream-json", command)
         tools_index = command.index("--tools")
-        self.assertEqual(command[tools_index + 1], "")
+        self.assertEqual(command[tools_index + 1], "default")
+        mode_index = command.index("--permission-mode")
+        self.assertEqual(command[mode_index + 1], "default")
+        prompt_tool_index = command.index("--permission-prompt-tool")
+        self.assertEqual(command[prompt_tool_index + 1], "stdio")
+        self.assertNotIn("--allowedTools", command)
         self.assertIn("SHARED CONTRACT TEST", command)
         self.assertEqual(command[-2:], ["--resume", CLAUDE_SESSION])
+
+
+class ClaudePermissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_callback_follows_georges_per_turn_grant(self):
+        endpoint = MODULE.ClaudeEndpoint(Path("/tmp"), CLAUDE_SESSION)
+        endpoint._write_message = AsyncMock()
+        request = {
+            "type": "control_request",
+            "request_id": "permission-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "git push origin main"},
+            },
+        }
+        loop = asyncio.get_running_loop()
+        endpoint.active = MODULE._ClaudeTurn(
+            done=loop.create_future(), emit=lambda _text: None, working=False
+        )
+
+        await endpoint._handle_control_request(request)
+        denied = endpoint._write_message.await_args.args[0]
+        self.assertEqual(
+            denied["response"]["response"]["behavior"], "deny"
+        )
+
+        endpoint._write_message.reset_mock()
+        endpoint.active.working = True
+        await endpoint._handle_control_request(request)
+        allowed = endpoint._write_message.await_args.args[0]
+        self.assertEqual(
+            allowed["response"]["response"]["behavior"], "allow"
+        )
+        self.assertEqual(
+            allowed["response"]["response"]["updatedInput"],
+            {"command": "git push origin main"},
+        )
 
 
 class FakeCodexEndpoint(MODULE.CodexEndpoint):
@@ -250,6 +327,14 @@ class FakeCodexEndpoint(MODULE.CodexEndpoint):
             }
         if method == "thread/resume":
             return {"thread": {"id": THREAD}}
+        if method == "turn/start":
+            assert self.active is not None
+            active = self.active
+            asyncio.get_running_loop().call_soon(
+                active.done.set_result,
+                MODULE.TurnResult("codex", "done"),
+            )
+            return {"turn": {"id": "turn-1"}}
         raise AssertionError(method)
 
     async def _send(self, message):
@@ -282,6 +367,20 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread_id, THREAD)
             endpoint.error_handle.close()
 
+    async def test_each_codex_turn_resets_read_only_or_full_working_policy(self):
+        endpoint = FakeCodexEndpoint()
+
+        await endpoint.ask("compare", lambda _text: None, working=False)
+        await endpoint.ask("implement", lambda _text: None, working=True)
+
+        turns = [entry[1] for entry in endpoint.sent if entry[0] == "turn/start"]
+        self.assertEqual(turns[0]["sandboxPolicy"]["type"], "readOnly")
+        self.assertFalse(turns[0]["sandboxPolicy"]["networkAccess"])
+        self.assertEqual(turns[1]["sandboxPolicy"]["type"], "dangerFullAccess")
+        self.assertEqual(turns[0]["approvalPolicy"], "never")
+        self.assertEqual(turns[1]["approvalPolicy"], "never")
+        self.assertEqual(turns[1]["cwd"], "/tmp")
+
 
 class FakeEndpoint:
     def __init__(self, name):
@@ -289,8 +388,8 @@ class FakeEndpoint:
         self.calls = []
         self.interruptions = 0
 
-    async def ask(self, prompt, emit):
-        self.calls.append(prompt)
+    async def ask(self, prompt, emit, working=False):
+        self.calls.append((prompt, working))
         emit(f"{self.name} answer")
         await asyncio.sleep(0)
         return MODULE.TurnResult(self.name, f"{self.name} answer")
@@ -305,8 +404,8 @@ class SlowEndpoint(FakeEndpoint):
         self.started = asyncio.Event()
         self.released = asyncio.Event()
 
-    async def ask(self, prompt, emit):
-        self.calls.append(prompt)
+    async def ask(self, prompt, emit, working=False):
+        self.calls.append((prompt, working))
         self.started.set()
         await self.released.wait()
         return MODULE.TurnResult(self.name, "", "interrupted")
@@ -325,10 +424,34 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         with redirect_stdout(io.StringIO()):
             results = await broker.ask("both", "same exact question")
 
-        self.assertEqual(claude.calls, ["same exact question"])
-        self.assertEqual(codex.calls, ["same exact question"])
+        self.assertEqual(len(claude.calls), 1)
+        self.assertEqual(len(codex.calls), 1)
+        self.assertFalse(claude.calls[0][1])
+        self.assertFalse(codex.calls[0][1])
+        self.assertIn("COCKPIT MODE: DISCUSSION", claude.calls[0][0])
+        self.assertIn("same exact question", claude.calls[0][0])
         self.assertEqual(set(results), {"claude", "codex"})
         self.assertFalse(broker.active_agents)
+
+    async def test_single_agent_turns_work_and_action_grants_real_tools(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        broker = MODULE.Broker(codex, claude)
+
+        with redirect_stdout(io.StringIO()):
+            await broker.ask("codex", "inspect and fix it")
+            await broker.ask("claude", "execute now", mode="action")
+
+        self.assertTrue(codex.calls[0][1])
+        self.assertIn("COCKPIT MODE: WORK", codex.calls[0][0])
+        self.assertTrue(claude.calls[0][1])
+        self.assertIn("COCKPIT MODE: ACTION", claude.calls[0][0])
+
+    async def test_both_cannot_receive_working_permissions(self):
+        broker = MODULE.Broker(FakeEndpoint("codex"), FakeEndpoint("claude"))
+
+        with self.assertRaisesRegex(MODULE.CockpitError, "/both is read-only"):
+            await broker.ask("both", "edit the same checkout", mode="action")
 
     async def test_forwarding_requires_george_and_targets_only_one_agent(self):
         codex = FakeEndpoint("codex")
@@ -340,8 +463,9 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             await broker.pass_answer("claude", "codex", "Find the flaw")
 
         self.assertEqual(len(codex.calls), 1)
-        self.assertIn("Claude's proposal", codex.calls[0])
-        self.assertIn("Find the flaw", codex.calls[0])
+        self.assertFalse(codex.calls[0][1])
+        self.assertIn("Claude's proposal", codex.calls[0][0])
+        self.assertIn("Find the flaw", codex.calls[0][0])
         self.assertEqual(claude.calls, [])
 
     async def test_both_receive_the_same_automatically_retrieved_evidence(self):
@@ -388,8 +512,9 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 await broker.ask("both", "Reconsider orchid distribution.")
 
         self.assertEqual(claude.calls, codex.calls)
-        self.assertIn("ORCHID-731", claude.calls[0])
-        self.assertIn("Reconsider orchid distribution.", claude.calls[0])
+        self.assertFalse(claude.calls[0][1])
+        self.assertIn("ORCHID-731", claude.calls[0][0])
+        self.assertIn("Reconsider orchid distribution.", claude.calls[0][0])
 
     async def test_stop_interrupts_every_active_endpoint(self):
         codex = SlowEndpoint("codex")

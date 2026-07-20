@@ -29,9 +29,9 @@ phone-to-laptop remote control.
 
 ## Supervised Claude-Codex cockpit
 
-The first working cockpit slice is a Termux switchboard controlled entirely by
-George. Start it from the directory whose context should be visible to the two
-agents:
+The cockpit is a Termux switchboard controlled entirely by George, with both
+comparison and real working turns. Start it from the directory whose context
+should be visible to the two agents:
 
 ```sh
 inception cockpit
@@ -49,6 +49,7 @@ At the `george>` prompt:
 /both Is this plan sound?
 /claude Critique the risky assumption.
 /codex Check Claude's objection against the requirements.
+/act codex Implement your recommendation, test it, commit it, and push it.
 /pass claude codex Focus on the second paragraph.
 /pass codex claude
 /context
@@ -56,16 +57,23 @@ At the `george>` prompt:
 /quit
 ```
 
-`both: ...`, `claude: ...`, and `codex: ...` are equivalent natural forms.
-`/both` sends the exact same message to each agent independently; neither sees
-the other's answer. `/pass` is the only cross-agent handoff. After every answer
-the system returns to idle, and no turn advances without George.
+`both: ...`, `claude: ...`, and `codex: ...` are equivalent natural forms;
+`claude!: ...` and `codex!: ...` are action shorthand. `/both` sends the exact
+same message to each agent independently in a hard read-only turn; neither sees
+the other's answer. `/pass` is the only cross-agent handoff and is also
+read-only. A direct `/claude` or `/codex` turn has real working tools and may
+inspect, edit, test, commit, and push when George's message requests it.
+`/act AGENT TEXT` makes that execution instruction unmistakable. Only one agent
+can receive a working turn at a time, every grant ends with the turn, and no
+turn advances without George.
 
-The cockpit is discussion-only by construction. Claude starts with all tools
-disabled. Codex uses a read-only sandbox, denies approvals, and receives an
-explicit no-action instruction. Press Ctrl-C or enter `/stop` during a response
-to interrupt it. Local pair state, the append-only conversation journal, the
-process lock, and diagnostics remain untracked under `runtime/`.
+Claude stays in the same live process and session. Its programmatic permission
+callback denies mutating tools during comparison turns and allows them during a
+single-agent working turn. Codex explicitly resets its sandbox on every turn:
+read-only for `/both` and `/pass`, full working access for direct or `/act`
+turns. Press Ctrl-C or enter `/stop` during a response to interrupt it. Local
+pair state, the append-only conversation journal, the process lock, and
+diagnostics remain untracked under `runtime/`.
 
 ### Minimum continuity layer
 
