@@ -28,6 +28,7 @@ from typing import Any, Callable, Sequence
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+TERMUX_HOME = Path(os.environ.get("HOME", str(PROJECT.parent))).expanduser().resolve()
 CONTINUITY_STATE_PATH = PROJECT / "runtime" / "state.json"
 DEFAULT_STATE_PATH = PROJECT / "runtime" / "cockpit-state.json"
 DEFAULT_JOURNAL_PATH = PROJECT / "runtime" / "cockpit-events.jsonl"
@@ -57,7 +58,11 @@ DISCUSSION_INSTRUCTIONS = COCKPIT_INSTRUCTIONS
 
 TURN_MODES = frozenset({"discussion", "work", "action"})
 
-HELP_TEXT = """Commands:
+HELP_TEXT = """Start from any Termux prompt:
+  inception cockpit                    resume the last project
+  inception cockpit agent bridge       switch to agent-bridge
+
+Inside the cockpit:
   /both TEXT              ask both independently in read-only discussion mode
   /claude TEXT            grant Claude one work-capable turn
   /codex TEXT             grant Codex one work-capable turn
@@ -70,6 +75,8 @@ HELP_TEXT = """Commands:
   /context                show the relationship covenant and continuity status
   /context full           also show the chronological relationship examples
   /context on|off         enable or disable retrieved evidence for this run
+  /status                 show project and whether both agents are connected
+  /projects               show project names accepted by the launcher
   /sessions               show the persistent pair
   /stop                   interrupt the running turn(s)
   /help                   show this help
@@ -92,6 +99,96 @@ def now_iso() -> str:
 
 def valid_uuid(value: Any) -> bool:
     return isinstance(value, str) and bool(UUID_RE.fullmatch(value))
+
+
+def git_project_root(path: Path) -> Path | None:
+    try:
+        candidate = path.expanduser().resolve()
+    except OSError:
+        return None
+    if not candidate.is_dir():
+        return None
+    for directory in (candidate, *candidate.parents):
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def discover_projects(home: Path = TERMUX_HOME) -> list[Path]:
+    try:
+        children = list(home.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        (
+            child.resolve()
+            for child in children
+            if child.is_dir() and (child / ".git").exists()
+        ),
+        key=lambda child: child.name.lower(),
+    )
+
+
+def project_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def resolve_named_project(name: str, home: Path = TERMUX_HOME) -> Path:
+    requested = name.strip()
+    if not requested:
+        raise CockpitError("The project name is empty")
+    direct = Path(requested).expanduser()
+    if direct.is_absolute() or "/" in requested:
+        root = git_project_root(direct)
+        if root:
+            return root
+    projects = discover_projects(home)
+    key = project_key(requested)
+    if not key:
+        raise CockpitError(f"Project name {requested!r} has no letters or numbers")
+    exact = [project for project in projects if project_key(project.name) == key]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [project for project in projects if key in project_key(project.name)]
+    if len(partial) == 1:
+        return partial[0]
+    names = ", ".join(project.name for project in projects) or "none found"
+    if partial:
+        matches = ", ".join(project.name for project in partial)
+        raise CockpitError(
+            f"Project name {requested!r} matches more than one folder: {matches}"
+        )
+    raise CockpitError(
+        f"I cannot find project {requested!r} on this phone. Available projects: {names}"
+    )
+
+
+def resolve_working_directory(
+    project_words: Sequence[str],
+    explicit_cwd: Path | None,
+    state: dict[str, Any],
+    launch_cwd: Path | None = None,
+    home: Path = TERMUX_HOME,
+) -> tuple[Path, str]:
+    if project_words and explicit_cwd is not None:
+        raise CockpitError("Use a project name or --cwd, not both")
+    if project_words:
+        name = " ".join(project_words)
+        return resolve_named_project(name, home), "named project"
+    if explicit_cwd is not None:
+        cwd = explicit_cwd.expanduser().resolve()
+        if not cwd.is_dir():
+            raise CockpitError(f"Working directory does not exist: {cwd}")
+        return cwd, "explicit folder"
+    saved = state.get("cwd")
+    if isinstance(saved, str):
+        root = git_project_root(Path(saved))
+        if root:
+            return root, "last project"
+    current_root = git_project_root(launch_cwd or Path.cwd())
+    if current_root:
+        return current_root, "current project"
+    return PROJECT, "default project"
 
 
 def canonical_thread_id(path: Path = CONTINUITY_STATE_PATH) -> str:
@@ -1355,8 +1452,21 @@ def parse_operator_command(line: str) -> OperatorCommand:
                 "Use /context, /context full, /context on, or /context off"
             )
         return OperatorCommand("context", text=setting)
-    if name in {"sessions", "stop", "help", "quit", "exit"}:
-        return OperatorCommand("quit" if name == "exit" else name)
+    if name in {
+        "status",
+        "where",
+        "projects",
+        "sessions",
+        "stop",
+        "help",
+        "quit",
+        "exit",
+    }:
+        if name == "exit":
+            name = "quit"
+        elif name == "where":
+            name = "status"
+        return OperatorCommand(name)
     raise CockpitError(f"Unknown command: /{name}")
 
 
@@ -1381,6 +1491,44 @@ class InputThread:
                 self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
                 return
             self.loop.call_soon_threadsafe(self.queue.put_nowait, line)
+
+
+def endpoint_connected(endpoint: Any) -> bool:
+    process = getattr(endpoint, "process", None)
+    return process is not None and getattr(process, "returncode", None) is None
+
+
+def show_status(broker: Broker, state: dict[str, Any]) -> None:
+    cwd = Path(str(state.get("cwd") or PROJECT))
+    print("\nCOCKPIT STATUS")
+    print(f"Working on: {cwd.name}")
+    print(f"Files available to the agents: {cwd}")
+    for agent in ("claude", "codex"):
+        if agent in broker.active_agents:
+            status = "WORKING NOW"
+        elif endpoint_connected(broker.endpoints[agent]):
+            status = "CONNECTED — waiting for George"
+        else:
+            status = "NOT CONNECTED"
+        print(f"{agent.title()}: {status}")
+    if all(endpoint_connected(broker.endpoints[agent]) for agent in ("claude", "codex")):
+        if broker.active_agents:
+            names = " and ".join(
+                agent.title()
+                for agent in ("claude", "codex")
+                if agent in broker.active_agents
+            )
+            print(f"A turn is running now: {names}.")
+        else:
+            print("Both agents are connected. Nothing happens until you grant a turn.")
+
+
+def show_projects(home: Path = TERMUX_HOME) -> None:
+    projects = discover_projects(home)
+    print("\nPROJECTS ON THIS PHONE")
+    for project in projects:
+        print(f"- {project.name}")
+    print("Switch next time with: inception cockpit PROJECT NAME")
 
 
 def show_sessions(state: dict[str, Any]) -> None:
@@ -1422,16 +1570,17 @@ def show_context(broker: Broker, full: bool = False) -> None:
 
 
 async def run_console(broker: Broker, state: dict[str, Any]) -> None:
-    print("\nGeorge Cockpit is ready. Both agents are silent until George grants a turn.")
-    print(
-        "Single-agent turns are work-capable; /both and /pass stay read-only."
-    )
-    print("Type /help for commands. Type /stop during a response to interrupt it.\n")
-    show_sessions(state)
+    print("\nGEORGE COCKPIT IS READY")
+    show_status(broker, state)
+    print("\nTYPE ONE OF THESE:")
+    print("/both YOUR QUESTION       Claude and Codex both answer")
+    print("/claude YOUR REQUEST      only Claude works; it may change files when asked")
+    print("/codex YOUR REQUEST       only Codex works; it may change files when asked")
+    print("/status                    show what is connected and which project is open")
+    print("/stop                      interrupt a running answer")
     if broker.continuity:
         print(
-            "Continuity: lived sessions + covenant + chronological relationship "
-            "examples active; at most two relevant prior cockpit exchanges per turn."
+            "Continuity memory: ON — both agents receive the shared working context."
         )
     print("\ngeorge> ", end="", flush=True)
 
@@ -1460,12 +1609,20 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
             if active_task and active_task in completed:
                 try:
                     results = await active_task
-                    statuses = ", ".join(
-                        f"{agent}={result.status}" for agent, result in results.items()
-                    )
-                    print(f"[SYSTEM] Turn closed ({statuses or 'no answer'}).")
+                    statuses = []
+                    for agent in ("claude", "codex"):
+                        result = results.get(agent)
+                        if result is None:
+                            statuses.append(f"{agent.title()}: idle")
+                        elif result.status == "completed":
+                            statuses.append(f"{agent.title()}: FINISHED")
+                        else:
+                            statuses.append(f"{agent.title()}: {result.status.upper()}")
+                    print(f"[DONE] {' | '.join(statuses)}")
+                    print("Both agents are waiting for your next instruction.")
                 except CockpitError as exc:
-                    print(f"[SYSTEM] {exc}")
+                    print(f"[PROBLEM] {exc}")
+                    show_status(broker, state)
                 running["active"] = False
                 active_task = None
                 print("george> ", end="", flush=True)
@@ -1493,6 +1650,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 if command.kind == "stop":
                     print("[SYSTEM] Interrupting active turn(s)…")
                     await broker.stop()
+                elif command.kind == "status":
+                    show_status(broker, state)
                 elif command.kind == "quit":
                     await broker.stop()
                     with contextlib.suppress(CockpitError):
@@ -1507,6 +1666,10 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 return
             if command.kind == "help":
                 print(HELP_TEXT)
+            elif command.kind == "status":
+                show_status(broker, state)
+            elif command.kind == "projects":
+                show_projects()
             elif command.kind == "sessions":
                 show_sessions(state)
             elif command.kind == "context":
@@ -1538,15 +1701,17 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 assert command.target
                 running["active"] = True
                 mode = "discussion" if command.target == "both" else "work"
-                grant = (
-                    "an independent read-only turn to both agents"
-                    if command.target == "both"
-                    else f"one work-capable {command.target} turn"
-                )
-                print(
-                    f"[SYSTEM] George granted {grant}. "
-                    "Type /stop and Enter (or press Ctrl-C) to interrupt."
-                )
+                if command.target == "both":
+                    print(
+                        "[WORKING] Claude and Codex are both answering now. "
+                        "Neither can change files during /both."
+                    )
+                else:
+                    other = "Codex" if command.target == "claude" else "Claude"
+                    print(
+                        f"[WORKING] {command.target.title()} is working now. "
+                        f"{other} is idle. Type /stop to interrupt."
+                    )
                 active_task = asyncio.create_task(
                     broker.ask(command.target, command.text, mode=mode)
                 )
@@ -1554,9 +1719,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 assert command.target
                 running["active"] = True
                 print(
-                    f"[SYSTEM] George granted one ACTION turn to {command.target}. "
-                    "Tools, edits, tests, commits, and pushes are available when "
-                    "requested. Type /stop and Enter (or press Ctrl-C) to interrupt."
+                    f"[WORKING] {command.target.title()} is executing your request "
+                    "now and may edit, test, commit, and push. Type /stop to interrupt."
                 )
                 active_task = asyncio.create_task(
                     broker.ask(command.target, command.text, mode="action")
@@ -1565,8 +1729,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 assert command.source and command.target
                 running["active"] = True
                 print(
-                    f"[SYSTEM] George forwarded {command.source} → {command.target}. "
-                    "Type /stop and Enter (or press Ctrl-C) to interrupt."
+                    f"[WORKING] {command.target.title()} is reviewing "
+                    f"{command.source.title()}'s answer now. Files stay unchanged."
                 )
                 active_task = asyncio.create_task(
                     broker.pass_answer(command.source, command.target, command.text)
@@ -1586,10 +1750,18 @@ def parser() -> argparse.ArgumentParser:
         description="George-controlled live Claude-Codex switchboard"
     )
     result.add_argument(
+        "project",
+        nargs="*",
+        help=(
+            "plain project name, for example: inception cockpit agent bridge "
+            "(default: resume the last project)"
+        ),
+    )
+    result.add_argument(
         "--cwd",
         type=Path,
-        default=Path.cwd(),
-        help="working directory visible to both agents (default: current directory)",
+        default=None,
+        help="advanced: exact working folder (normally use a plain project name)",
     )
     result.add_argument(
         "--codex-source",
@@ -1625,14 +1797,14 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    cwd = args.cwd.expanduser().resolve()
-    if not cwd.is_dir():
-        raise CockpitError(f"Working directory does not exist: {cwd}")
     if args.codex_source and not valid_uuid(args.codex_source):
         raise CockpitError(f"Invalid --codex-source: {args.codex_source!r}")
 
     store = StateStore(args.state)
     state = store.load()
+    cwd, cwd_source = resolve_working_directory(
+        args.project, args.cwd, state, launch_cwd=Path.cwd()
+    )
     source = (
         state.get("codex_source_thread_id")
         or args.codex_source
@@ -1640,6 +1812,7 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     state["codex_source_thread_id"] = source
     state["cwd"] = str(cwd)
+    state["cwd_source"] = cwd_source
     store.save()
     continuity = ContinuityEngine(args.covenant, args.microhistory, args.journal)
     instructions = endpoint_instructions(continuity.covenant, continuity.microhistory)
@@ -1663,11 +1836,14 @@ async def async_main(args: argparse.Namespace) -> int:
         instructions=instructions,
     )
     try:
-        print("Starting supervised Codex endpoint…", flush=True)
+        print(f"Opening project: {cwd.name}", flush=True)
+        print("Connecting Codex…", flush=True)
         state["codex_thread_id"] = await codex.start()
         store.save()
-        print("Starting supervised Claude endpoint…", flush=True)
+        print("Codex connected.", flush=True)
+        print("Connecting Claude…", flush=True)
         await claude.start()
+        print("Claude connected.", flush=True)
         broker = Broker(
             codex,
             claude,

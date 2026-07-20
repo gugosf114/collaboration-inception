@@ -30,18 +30,30 @@ phone-to-laptop remote control.
 ## Supervised Claude-Codex cockpit
 
 The cockpit is a Termux switchboard controlled entirely by George, with both
-comparison and real working turns. Start it from the directory whose context
-should be visible to the two agents:
+comparison and real working turns. From any ordinary Termux prompt, type:
 
 ```sh
 inception cockpit
 ```
 
-The cockpit starts both endpoints itself. Do not start separate Claude and
-Codex terminals for this flow. Codex uses its JSONL app-server; Claude uses its
-streaming JSON input and output. The first run forks the canonical Codex history
-into a persistent cockpit thread and creates a persistent Claude session. Later
-runs resume that same pair.
+No `cd`, folder path, or separate Claude/Codex terminal is required. A bare
+launch resumes the last project. To switch projects, put its plain name after
+the command; spaces and hyphens are treated the same:
+
+```sh
+inception cockpit agent bridge
+inception cockpit collaboration inception
+```
+
+The startup screen names the selected project and prints `CONNECTED` separately
+for Claude and Codex. It does not show the `george>` prompt until both startup
+handshakes succeed. Inside the cockpit, `/status` repeats this information and
+`/projects` lists the project names available on the phone.
+
+The cockpit starts both endpoints itself. Codex uses its JSONL app-server;
+Claude uses its streaming JSON input and output. The first run forks the
+canonical Codex history into a persistent cockpit thread and creates a
+persistent Claude session. Later runs resume that same pair.
 
 At the `george>` prompt:
 

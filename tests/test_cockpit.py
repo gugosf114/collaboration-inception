@@ -82,6 +82,64 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((full.kind, full.text), ("context", "full"))
         self.assertEqual((disable.kind, disable.text), ("context", "off"))
 
+    def test_parses_plain_status_and_project_commands(self):
+        status = MODULE.parse_operator_command("/status")
+        where = MODULE.parse_operator_command("/where")
+        projects = MODULE.parse_operator_command("/projects")
+
+        self.assertEqual(status.kind, "status")
+        self.assertEqual(where.kind, "status")
+        self.assertEqual(projects.kind, "projects")
+
+
+class ProjectResolutionTests(unittest.TestCase):
+    @staticmethod
+    def make_project(home: Path, name: str) -> Path:
+        project = home / name
+        (project / ".git").mkdir(parents=True)
+        return project
+
+    def test_bare_termux_launch_resumes_last_project_not_phone_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            last = self.make_project(home, "collaboration-inception")
+
+            cwd, source = MODULE.resolve_working_directory(
+                [], None, {"cwd": str(last)}, launch_cwd=home, home=home
+            )
+
+        self.assertEqual(cwd, last)
+        self.assertEqual(source, "last project")
+
+    def test_spoken_project_name_resolves_without_cd_or_hyphen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            agent_bridge = self.make_project(home, "agent-bridge")
+            self.make_project(home, "collaboration-inception")
+
+            cwd, source = MODULE.resolve_working_directory(
+                ["agent", "bridge"], None, {}, launch_cwd=home, home=home
+            )
+
+        self.assertEqual(cwd, agent_bridge)
+        self.assertEqual(source, "named project")
+
+    def test_unknown_project_error_lists_valid_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.make_project(home, "agent-bridge")
+
+            with self.assertRaisesRegex(
+                MODULE.CockpitError, "Available projects: agent-bridge"
+            ):
+                MODULE.resolve_named_project("does not exist", home)
+
+    def test_launcher_accepts_plain_project_words(self):
+        args = MODULE.parser().parse_args(["agent", "bridge"])
+
+        self.assertEqual(args.project, ["agent", "bridge"])
+        self.assertIsNone(args.cwd)
+
 
 class StateTests(unittest.TestCase):
     def test_state_round_trip_is_private_and_validated(self):
@@ -416,6 +474,44 @@ class SlowEndpoint(FakeEndpoint):
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_status_names_project_and_both_connections(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        codex.process = type("Process", (), {"returncode": None})()
+        claude.process = type("Process", (), {"returncode": None})()
+        broker = MODULE.Broker(codex, claude)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            MODULE.show_status(
+                broker,
+                {"cwd": "/data/data/com.termux/files/home/agent-bridge"},
+            )
+
+        visible = output.getvalue()
+        self.assertIn("Working on: agent-bridge", visible)
+        self.assertIn("Claude: CONNECTED", visible)
+        self.assertIn("Codex: CONNECTED", visible)
+        self.assertIn("Both agents are connected", visible)
+
+    async def test_status_names_only_the_agent_working_now(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        codex.process = type("Process", (), {"returncode": None})()
+        claude.process = type("Process", (), {"returncode": None})()
+        broker = MODULE.Broker(codex, claude)
+        broker.active_agents = {"claude"}
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            MODULE.show_status(broker, {"cwd": "/phone/agent-bridge"})
+
+        visible = output.getvalue()
+        self.assertIn("Claude: WORKING NOW", visible)
+        self.assertIn("Codex: CONNECTED — waiting for George", visible)
+        self.assertIn("A turn is running now: Claude", visible)
+        self.assertNotIn("Nothing happens until", visible)
+
     async def test_both_get_exact_prompt_once_and_never_auto_advance(self):
         codex = FakeEndpoint("codex")
         claude = FakeEndpoint("claude")
