@@ -8,8 +8,9 @@ thread; they are not presented as memories the receiving model personally had.
 
 ## One-person install
 
-The person needs working, signed-in Codex and Claude Code command-line tools.
-On Termux, Claude Code must be available inside the Debian PRoot.
+The person needs working, signed-in Codex and Claude Code command-line tools,
+plus ImageMagick for marking screenshots. On Termux, Claude Code must be
+available inside the Debian PRoot.
 
 ```sh
 git clone https://github.com/gugosf114/collaboration-inception.git
@@ -83,6 +84,8 @@ At the `george>` prompt:
 ```text
 /both Is this plan sound?
 /talk 2 Decide the strongest way to repair this design.
+/look "/path/to/screenshot.png" What is wrong here?
+/point "/path/to/screenshot.png" 420 815 Why is this button confusing?
 /claude Critique the risky assumption.
 /codex Check Claude's objection against the requirements.
 /act codex Implement your recommendation, test it, commit it, and push it.
@@ -99,9 +102,13 @@ same message to each agent independently in a hard read-only turn; neither sees
 the other's answer. `/talk` first gets both independent answers, then alternates
 the exact completed answers between Claude and Codex for the number of visible
 replies George granted. It is read-only, bounded to six replies, interruptible,
-and never continues on its own. `/pass` remains the manual cross-agent handoff
-and is also read-only. A direct `/claude` or `/codex` turn has real working tools and may
-inspect, edit, test, commit, and push when George's message requests it.
+and never continues on its own. `/look` privately stages one screenshot or image
+and gives that exact copy to both models. `/point` adds a red circle and
+crosshair at the requested pixel, then opens a two-reply dialogue about it.
+Paths containing spaces must be quoted. The private copies stay untracked under
+`runtime/attachments/`. `/pass` remains the manual cross-agent handoff and is
+also read-only. A direct `/claude` or `/codex` turn has real working tools and
+may inspect, edit, test, commit, and push when George's message requests it.
 `/act AGENT TEXT` makes that execution instruction unmistakable. Only one agent
 can receive a working turn at a time, every grant ends with the turn, and no
 turn advances without George.

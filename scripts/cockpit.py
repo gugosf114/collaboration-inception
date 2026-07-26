@@ -15,7 +15,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -38,8 +40,14 @@ DEFAULT_STATE_PATH = PROJECT / "runtime" / "cockpit-state.json"
 DEFAULT_JOURNAL_PATH = PROJECT / "runtime" / "cockpit-events.jsonl"
 DEFAULT_LOCK_PATH = PROJECT / "runtime" / "cockpit.lock"
 DEFAULT_ERROR_LOG = PROJECT / "runtime" / "cockpit-errors.log"
+DEFAULT_ATTACHMENT_DIR = PROJECT / "runtime" / "attachments"
 DEFAULT_COVENANT_PATH = PROJECT / "context" / "WORKING_COVENANT.md"
 DEFAULT_MICROHISTORY_PATH = PROJECT / "context" / "MICROHISTORY_V1.md"
+IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+# Claude emits an image read as one base64 JSONL record. Asyncio's 64 KiB
+# default stream limit cuts that record in half and disconnects the endpoint.
+CLAUDE_STREAM_LIMIT = 40 * 1024 * 1024
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -71,6 +79,8 @@ HELP_TEXT = """Start from any Termux prompt:
 Inside the cockpit:
   /both TEXT              ask both independently in read-only discussion mode
   /talk [REPLIES] TEXT    let both answer, then visibly reply to each other
+  /look IMAGE TEXT        give both the same screenshot or image
+  /point IMAGE X Y TEXT   mark one spot, then let both discuss it
   /claude TEXT            grant Claude one work-capable turn
   /codex TEXT             grant Codex one work-capable turn
   /act claude TEXT        tell Claude to execute now with working tools
@@ -341,6 +351,104 @@ def compact_text(text: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: max(0, limit - 1)].rstrip() + "…"
+
+
+def resolve_shared_image(value: str, base: Path) -> Path:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        image = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise CockpitError(f"Cannot find shared image {value!r}: {exc}") from exc
+    if not image.is_file():
+        raise CockpitError(f"Shared image is not a file: {image}")
+    if image.suffix.lower() not in IMAGE_SUFFIXES:
+        allowed = ", ".join(sorted(IMAGE_SUFFIXES))
+        raise CockpitError(f"Shared image must be one of: {allowed}")
+    size = image.stat().st_size
+    if size <= 0:
+        raise CockpitError(f"Shared image is empty: {image}")
+    if size > MAX_ATTACHMENT_BYTES:
+        raise CockpitError(
+            f"Shared image is {size / 1024 / 1024:.1f} MiB; limit is "
+            f"{MAX_ATTACHMENT_BYTES / 1024 / 1024:.0f} MiB"
+        )
+    return image
+
+
+def annotate_shared_image(
+    source: Path, destination: Path, x: int, y: int
+) -> tuple[int, int]:
+    magick = shutil.which("magick")
+    if not magick:
+        raise CockpitError("ImageMagick is required for /point")
+    identified = subprocess.run(
+        [magick, "identify", "-format", "%w %h", str(source)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if identified.returncode != 0:
+        detail = identified.stderr.strip() or identified.stdout.strip()
+        raise CockpitError(f"Cannot read image dimensions: {detail}")
+    try:
+        width, height = (int(value) for value in identified.stdout.split())
+    except (TypeError, ValueError) as exc:
+        raise CockpitError(
+            f"ImageMagick returned invalid dimensions: {identified.stdout!r}"
+        ) from exc
+    if not 0 <= x < width or not 0 <= y < height:
+        raise CockpitError(
+            f"Point ({x}, {y}) is outside the {width}×{height} image"
+        )
+    radius = max(24, min(width, height) // 20)
+    stroke = max(5, radius // 7)
+    marked = subprocess.run(
+        [
+            magick,
+            str(source),
+            "-stroke",
+            "#ff1744",
+            "-strokewidth",
+            str(stroke),
+            "-fill",
+            "none",
+            "-draw",
+            f"circle {x},{y} {x + radius},{y}",
+            "-draw",
+            f"line {x - radius},{y} {x + radius},{y}",
+            "-draw",
+            f"line {x},{y - radius} {x},{y + radius}",
+            str(destination),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if marked.returncode != 0 or not destination.is_file():
+        detail = marked.stderr.strip() or marked.stdout.strip()
+        raise CockpitError(f"Cannot mark the shared image: {detail}")
+    return width, height
+
+
+def stage_shared_image(
+    value: str,
+    base: Path,
+    destination_dir: Path = DEFAULT_ATTACHMENT_DIR,
+    point: tuple[int, int] | None = None,
+) -> Path:
+    source = resolve_shared_image(value, base)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(destination_dir, 0o700)
+    suffix = ".png" if point else source.suffix.lower()
+    destination = destination_dir / f"shared-{uuid.uuid4().hex}{suffix}"
+    if point:
+        annotate_shared_image(source, destination, *point)
+    else:
+        shutil.copy2(source, destination)
+    os.chmod(destination, 0o600)
+    return destination
 
 
 def continuity_terms(text: str) -> set[str]:
@@ -690,7 +798,11 @@ class CodexEndpoint:
         return thread_id
 
     async def ask(
-        self, prompt: str, emit: DeltaCallback, working: bool = False
+        self,
+        prompt: str,
+        emit: DeltaCallback,
+        working: bool = False,
+        attachments: Sequence[Path] = (),
     ) -> TurnResult:
         if self.active is not None:
             raise CockpitError("Codex already has an active turn")
@@ -709,7 +821,13 @@ class CodexEndpoint:
                 "turn/start",
                 {
                     "threadId": self.thread_id,
-                    "input": [{"type": "text", "text": prompt}],
+                    "input": [
+                        {"type": "text", "text": prompt},
+                        *(
+                            {"type": "localImage", "path": str(path)}
+                            for path in attachments
+                        ),
+                    ],
                     # turn/start overrides persist, so every turn explicitly resets
                     # the intended boundary instead of inheriting the last one.
                     "cwd": str(self.cwd),
@@ -887,6 +1005,7 @@ class _ClaudeTurn:
     done: asyncio.Future[TurnResult]
     emit: DeltaCallback
     working: bool = False
+    attachments: tuple[Path, ...] = ()
     streamed: str = ""
     assistant_messages: list[str] = field(default_factory=list)
 
@@ -1011,6 +1130,7 @@ class ClaudeEndpoint:
             stderr=self.error_handle,
             cwd=self.cwd,
             start_new_session=True,
+            limit=CLAUDE_STREAM_LIMIT,
         )
         self.reader_task = asyncio.create_task(self._read_loop(self.process))
         await self._control_request(
@@ -1053,14 +1173,35 @@ class ClaudeEndpoint:
             self.pending_controls.pop(request_id, None)
 
     async def ask(
-        self, prompt: str, emit: DeltaCallback, working: bool = False
+        self,
+        prompt: str,
+        emit: DeltaCallback,
+        working: bool = False,
+        attachments: Sequence[Path] = (),
     ) -> TurnResult:
         if self.active is not None:
             raise CockpitError("Claude already has an active turn")
         await self._spawn()
         loop = asyncio.get_running_loop()
-        turn = _ClaudeTurn(done=loop.create_future(), emit=emit, working=working)
+        shared = tuple(path.expanduser().resolve() for path in attachments)
+        turn = _ClaudeTurn(
+            done=loop.create_future(),
+            emit=emit,
+            working=working,
+            attachments=shared,
+        )
         self.active = turn
+        if shared:
+            paths = "\n".join(f"- {path}" for path in shared)
+            prompt = (
+                f"{prompt}\n\n"
+                "[Shared cockpit image]\n"
+                "Before answering, use the Read tool on every exact local path "
+                "below. George explicitly attached these images for this turn. "
+                "Do not claim to have inspected them unless Read succeeds.\n"
+                f"{paths}\n"
+                "[End shared cockpit image]"
+            )
         message = {
             "type": "user",
             "message": {
@@ -1146,6 +1287,17 @@ class ClaudeEndpoint:
                     "behavior": "allow",
                     "updatedInput": request.get("input") or {},
                 }
+            elif (
+                turn is not None
+                and request.get("tool_name") == "Read"
+                and self._attachment_read_is_allowed(
+                    request.get("input") or {}, turn.attachments
+                )
+            ):
+                response_data = {
+                    "behavior": "allow",
+                    "updatedInput": request.get("input") or {},
+                }
             else:
                 response_data = {
                     "behavior": "deny",
@@ -1175,6 +1327,19 @@ class ClaudeEndpoint:
                 },
             }
         )
+
+    @staticmethod
+    def _attachment_read_is_allowed(
+        tool_input: dict[str, Any], attachments: Sequence[Path]
+    ) -> bool:
+        value = tool_input.get("file_path")
+        if not isinstance(value, str):
+            return False
+        try:
+            requested = Path(value).expanduser().resolve(strict=True)
+        except OSError:
+            return False
+        return requested in attachments
 
     async def _read_loop(self, process: asyncio.subprocess.Process) -> None:
         assert process.stdout
@@ -1299,17 +1464,24 @@ class Broker:
         claude: Any,
         journal: Journal | None = None,
         continuity: ContinuityEngine | None = None,
+        attachment_dir: Path = DEFAULT_ATTACHMENT_DIR,
     ):
         self.endpoints = {"codex": codex, "claude": claude}
         self.journal = journal
         self.continuity = continuity
+        self.attachment_dir = attachment_dir
+        self.cwd = Path(getattr(codex, "cwd", Path.cwd())).expanduser().resolve()
         self.last_packet = ContinuityPacket()
         self.last: dict[str, str] = {}
         self.active_agents: set[str] = set()
         self.dialogue_stop_requested = False
 
     async def ask(
-        self, target: str, prompt: str, mode: str | None = None
+        self,
+        target: str,
+        prompt: str,
+        mode: str | None = None,
+        attachments: Sequence[Path] = (),
     ) -> dict[str, TurnResult]:
         if self.active_agents:
             raise CockpitError("A cockpit turn is already running")
@@ -1353,6 +1525,7 @@ class Broker:
                     "target": target,
                     "mode": mode,
                     "text": prompt,
+                    "attachments": [str(path) for path in attachments],
                     "continuity_episode_ids": list(packet.episode_ids),
                 }
             )
@@ -1363,6 +1536,7 @@ class Broker:
                     delivered_prompt,
                     lambda text: output.feed(agent, text),
                     working=working,
+                    attachments=attachments,
                 )
                 return agent, result
             except Exception as exc:
@@ -1416,7 +1590,10 @@ class Broker:
         return await self.ask(target, prompt, mode="discussion")
 
     async def talk(
-        self, topic: str, reply_turns: int = 2
+        self,
+        topic: str,
+        reply_turns: int = 2,
+        attachments: Sequence[Path] = (),
     ) -> dict[str, TurnResult]:
         if not 1 <= reply_turns <= 6:
             raise CockpitError("A dialogue needs between 1 and 6 replies")
@@ -1431,6 +1608,7 @@ class Broker:
                 f"Topic: {topic}"
             ),
             mode="discussion",
+            attachments=attachments,
         )
         latest = dict(opening)
         if self.dialogue_stop_requested or any(
@@ -1464,6 +1642,38 @@ class Broker:
         print("[TALK] The granted dialogue is finished. Control returns to George.")
         return latest
 
+    async def look(
+        self,
+        image_value: str,
+        prompt: str,
+        point: tuple[int, int] | None = None,
+        reply_turns: int = 0,
+    ) -> dict[str, TurnResult]:
+        image = stage_shared_image(
+            image_value,
+            self.cwd,
+            destination_dir=self.attachment_dir,
+            point=point,
+        )
+        if point:
+            prompt = (
+                f"{prompt}\n\nThe red circle and crosshair mark George's exact "
+                f"point at pixel ({point[0]}, {point[1]}). Focus on that area."
+            )
+        print(f"[LOOK] Shared image staged privately as {image.name}.")
+        if reply_turns:
+            return await self.talk(
+                prompt,
+                reply_turns=reply_turns,
+                attachments=(image,),
+            )
+        return await self.ask(
+            "both",
+            prompt,
+            mode="discussion",
+            attachments=(image,),
+        )
+
     async def stop(self) -> None:
         self.dialogue_stop_requested = True
         await asyncio.gather(
@@ -1479,6 +1689,8 @@ class OperatorCommand:
     text: str = ""
     source: str | None = None
     replies: int = 0
+    image: str | None = None
+    point: tuple[int, int] | None = None
 
 
 def talk_command(text: str) -> OperatorCommand:
@@ -1495,6 +1707,30 @@ def talk_command(text: str) -> OperatorCommand:
     if not 1 <= replies <= 6:
         raise CockpitError("/talk replies must be between 1 and 6")
     return OperatorCommand("talk", text=rest, replies=replies)
+
+
+def image_command(kind: str, text: str) -> OperatorCommand:
+    try:
+        parts = shlex.split(text)
+    except ValueError as exc:
+        raise CockpitError(f"Cannot parse /{kind}: {exc}") from exc
+    if kind == "look":
+        if len(parts) < 2:
+            raise CockpitError("Use /look IMAGE QUESTION")
+        return OperatorCommand("look", text=" ".join(parts[1:]), image=parts[0])
+    if len(parts) < 4:
+        raise CockpitError("Use /point IMAGE X Y QUESTION")
+    try:
+        point = (int(parts[1]), int(parts[2]))
+    except ValueError as exc:
+        raise CockpitError("/point X and Y must be whole pixel numbers") from exc
+    return OperatorCommand(
+        "point",
+        text=" ".join(parts[3:]),
+        replies=2,
+        image=parts[0],
+        point=point,
+    )
 
 
 def parse_operator_command(line: str) -> OperatorCommand:
@@ -1525,7 +1761,7 @@ def parse_operator_command(line: str) -> OperatorCommand:
         )
     if not raw.startswith("/"):
         raise CockpitError(
-            "Start with /talk, /both, /claude, or /codex "
+            "Start with /talk, /look, /point, /both, /claude, or /codex "
             "(or use 'talk: ...')"
         )
     name, _, rest = raw[1:].partition(" ")
@@ -1537,6 +1773,8 @@ def parse_operator_command(line: str) -> OperatorCommand:
         return OperatorCommand("ask", name, rest)
     if name == "talk":
         return talk_command(rest)
+    if name in {"look", "point"}:
+        return image_command(name, rest)
     if name == "act":
         parts = rest.split(maxsplit=1)
         if len(parts) != 2 or parts[0].lower() not in {"claude", "codex"}:
@@ -1687,6 +1925,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
     print("\nTYPE ONE OF THESE:")
     print("/both YOUR QUESTION       Claude and Codex both answer")
     print("/talk YOUR QUESTION       Claude and Codex answer each other visibly")
+    print("/look IMAGE QUESTION      both inspect the same screenshot or image")
+    print("/point IMAGE X Y QUESTION mark one spot, then both discuss it")
     print("/claude YOUR REQUEST      only Claude works; it may change files when asked")
     print("/codex YOUR REQUEST       only Codex works; it may change files when asked")
     print("/status                    show what is connected and which project is open")
@@ -1836,6 +2076,27 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 )
                 active_task = asyncio.create_task(
                     broker.talk(command.text, reply_turns=command.replies)
+                )
+            elif command.kind in {"look", "point"}:
+                assert command.image
+                running["active"] = True
+                if command.kind == "point":
+                    print(
+                        "[WORKING] Marking George's point, then Claude and Codex "
+                        "will discuss the same image. Type /stop to interrupt."
+                    )
+                else:
+                    print(
+                        "[WORKING] Claude and Codex are inspecting the same image. "
+                        "Type /stop to interrupt."
+                    )
+                active_task = asyncio.create_task(
+                    broker.look(
+                        command.image,
+                        command.text,
+                        point=command.point,
+                        reply_turns=command.replies,
+                    )
                 )
             elif command.kind == "act":
                 assert command.target

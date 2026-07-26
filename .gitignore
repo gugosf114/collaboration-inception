@@ -19,3 +19,4 @@ runtime/cockpit-state.json
 runtime/cockpit-events.jsonl
 runtime/cockpit-errors.log
 runtime/cockpit.lock
+runtime/attachments/

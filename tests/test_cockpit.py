@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -117,6 +118,39 @@ class CommandTests(unittest.TestCase):
                 with self.assertRaises(MODULE.CockpitError):
                     MODULE.parse_operator_command(command)
 
+    def test_parses_shared_image_and_point_commands(self):
+        look = MODULE.parse_operator_command(
+            '/look "screenshots/broken page.png" What is wrong here?'
+        )
+        point = MODULE.parse_operator_command(
+            '/point "screenshots/broken page.png" 420 815 Why this button?'
+        )
+
+        self.assertEqual(
+            (look.kind, look.image, look.text),
+            ("look", "screenshots/broken page.png", "What is wrong here?"),
+        )
+        self.assertEqual(
+            (point.kind, point.image, point.point, point.replies, point.text),
+            (
+                "point",
+                "screenshots/broken page.png",
+                (420, 815),
+                2,
+                "Why this button?",
+            ),
+        )
+
+    def test_rejects_malformed_shared_image_commands(self):
+        for command in (
+            "/look only-a-file.png",
+            "/point image.png x 20 question",
+            "/point image.png 10 20",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaises(MODULE.CockpitError):
+                    MODULE.parse_operator_command(command)
+
 
 class ProjectResolutionTests(unittest.TestCase):
     @staticmethod
@@ -165,6 +199,52 @@ class ProjectResolutionTests(unittest.TestCase):
 
         self.assertEqual(args.project, ["agent", "bridge"])
         self.assertIsNone(args.cwd)
+
+
+class SharedImageTests(unittest.TestCase):
+    def test_stages_a_private_untracked_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "screen.png"
+            source.write_bytes(b"image bytes")
+            staged = MODULE.stage_shared_image(
+                str(source),
+                base,
+                destination_dir=base / "private",
+            )
+
+            self.assertEqual(staged.read_bytes(), b"image bytes")
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(staged.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_marks_georges_point_with_a_circle_and_crosshair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "screen.png"
+            destination = base / "marked.png"
+            source.write_bytes(b"image bytes")
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                if command[1] == "identify":
+                    return subprocess.CompletedProcess(command, 0, "1000 800", "")
+                Path(command[-1]).write_bytes(b"marked")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(MODULE.shutil, "which", return_value="/bin/magick"),
+                patch.object(MODULE.subprocess, "run", side_effect=fake_run),
+            ):
+                dimensions = MODULE.annotate_shared_image(
+                    source, destination, 420, 315
+                )
+
+            self.assertEqual(dimensions, (1000, 800))
+            self.assertEqual(destination.read_bytes(), b"marked")
+            rendered = " ".join(commands[1])
+            self.assertIn("circle 420,315", rendered)
+            self.assertIn("line 380,315 460,315", rendered)
 
 
 class PortableLineageTests(unittest.TestCase):
@@ -353,6 +433,11 @@ class ContinuityTests(unittest.TestCase):
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_claude_stream_can_hold_the_largest_base64_image_record(self):
+        largest_base64_record = (MODULE.MAX_ATTACHMENT_BYTES * 4 // 3) + 16_384
+
+        self.assertGreater(MODULE.CLAUDE_STREAM_LIMIT, largest_base64_record)
+
     def test_extracts_claude_stream_delta_and_completed_message(self):
         delta = {
             "type": "stream_event",
@@ -431,6 +516,42 @@ class ClaudePermissionTests(unittest.IsolatedAsyncioTestCase):
             {"command": "git push origin main"},
         )
 
+    async def test_read_only_turn_can_open_only_its_attached_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "shared.png"
+            other = Path(directory) / "other.png"
+            shared.write_bytes(b"shared")
+            other.write_bytes(b"other")
+            endpoint = MODULE.ClaudeEndpoint(Path("/tmp"), CLAUDE_SESSION)
+            endpoint._write_message = AsyncMock()
+            loop = asyncio.get_running_loop()
+            endpoint.active = MODULE._ClaudeTurn(
+                done=loop.create_future(),
+                emit=lambda _text: None,
+                working=False,
+                attachments=(shared.resolve(),),
+            )
+
+            async def permission(path: Path):
+                endpoint._write_message.reset_mock()
+                await endpoint._handle_control_request(
+                    {
+                        "type": "control_request",
+                        "request_id": f"read-{path.name}",
+                        "request": {
+                            "subtype": "can_use_tool",
+                            "tool_name": "Read",
+                            "input": {"file_path": str(path)},
+                        },
+                    }
+                )
+                return endpoint._write_message.await_args.args[0]["response"][
+                    "response"
+                ]["behavior"]
+
+            self.assertEqual(await permission(shared), "allow")
+            self.assertEqual(await permission(other), "deny")
+
 
 class FakeCodexEndpoint(MODULE.CodexEndpoint):
     def __init__(self):
@@ -504,15 +625,37 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turns[1]["approvalPolicy"], "never")
         self.assertEqual(turns[1]["cwd"], "/tmp")
 
+    async def test_codex_receives_the_shared_image_as_native_local_input(self):
+        endpoint = FakeCodexEndpoint()
+        image = Path("/tmp/shared-cockpit.png")
+
+        await endpoint.ask(
+            "inspect the marked area",
+            lambda _text: None,
+            working=False,
+            attachments=(image,),
+        )
+
+        turn = next(entry[1] for entry in endpoint.sent if entry[0] == "turn/start")
+        self.assertEqual(
+            turn["input"],
+            [
+                {"type": "text", "text": "inspect the marked area"},
+                {"type": "localImage", "path": str(image)},
+            ],
+        )
+
 
 class FakeEndpoint:
     def __init__(self, name):
         self.name = name
         self.calls = []
+        self.attachment_calls = []
         self.interruptions = 0
 
-    async def ask(self, prompt, emit, working=False):
+    async def ask(self, prompt, emit, working=False, attachments=()):
         self.calls.append((prompt, working))
+        self.attachment_calls.append(tuple(attachments))
         emit(f"{self.name} answer")
         await asyncio.sleep(0)
         return MODULE.TurnResult(self.name, f"{self.name} answer")
@@ -527,8 +670,9 @@ class SlowEndpoint(FakeEndpoint):
         self.started = asyncio.Event()
         self.released = asyncio.Event()
 
-    async def ask(self, prompt, emit, working=False):
+    async def ask(self, prompt, emit, working=False, attachments=()):
         self.calls.append((prompt, working))
+        self.attachment_calls.append(tuple(attachments))
         self.started.set()
         await self.released.wait()
         return MODULE.TurnResult(self.name, "", "interrupted")
@@ -646,6 +790,27 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Original topic: Choose the repair", codex.calls[1][0])
         self.assertIn("[TALK] Reply 1/2: Codex answers Claude.", output.getvalue())
         self.assertEqual(set(results), {"claude", "codex"})
+
+    async def test_look_gives_both_agents_the_exact_same_private_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "screen.png"
+            source.write_bytes(b"screen")
+            codex = FakeEndpoint("codex")
+            claude = FakeEndpoint("claude")
+            broker = MODULE.Broker(
+                codex,
+                claude,
+                attachment_dir=base / "attachments",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                await broker.look(str(source), "Inspect this")
+
+            self.assertEqual(len(codex.attachment_calls), 1)
+            self.assertEqual(codex.attachment_calls, claude.attachment_calls)
+            shared = codex.attachment_calls[0][0]
+            self.assertEqual(shared.read_bytes(), b"screen")
 
     async def test_stop_ends_dialogue_before_any_cross_agent_reply(self):
         codex = SlowEndpoint("codex")
