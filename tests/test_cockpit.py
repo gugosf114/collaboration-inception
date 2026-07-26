@@ -91,6 +91,32 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(where.kind, "status")
         self.assertEqual(projects.kind, "projects")
 
+    def test_parses_bounded_visible_dialogue(self):
+        default = MODULE.parse_operator_command("/talk Find the strongest answer")
+        numbered = MODULE.parse_operator_command(
+            "/talk 4 Challenge the deployment plan"
+        )
+        natural = MODULE.parse_operator_command("talk: Compare both designs")
+
+        self.assertEqual(
+            (default.kind, default.replies, default.text),
+            ("talk", 2, "Find the strongest answer"),
+        )
+        self.assertEqual(
+            (numbered.kind, numbered.replies, numbered.text),
+            ("talk", 4, "Challenge the deployment plan"),
+        )
+        self.assertEqual(
+            (natural.kind, natural.replies, natural.text),
+            ("talk", 2, "Compare both designs"),
+        )
+
+    def test_rejects_unbounded_or_empty_dialogue(self):
+        for command in ("/talk", "/talk 0 stop", "/talk 7 too many", "/talk 3"):
+            with self.subTest(command=command):
+                with self.assertRaises(MODULE.CockpitError):
+                    MODULE.parse_operator_command(command)
+
 
 class ProjectResolutionTests(unittest.TestCase):
     @staticmethod
@@ -602,6 +628,40 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Claude's proposal", codex.calls[0][0])
         self.assertIn("Find the flaw", codex.calls[0][0])
         self.assertEqual(claude.calls, [])
+
+    async def test_talk_is_visible_bounded_and_truly_cross_agent(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        broker = MODULE.Broker(codex, claude)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            results = await broker.talk("Choose the repair", reply_turns=2)
+
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(len(codex.calls), 2)
+        self.assertTrue(all(not working for _, working in claude.calls + codex.calls))
+        self.assertIn("claude answer", codex.calls[1][0])
+        self.assertIn("codex answer", claude.calls[1][0])
+        self.assertIn("Original topic: Choose the repair", codex.calls[1][0])
+        self.assertIn("[TALK] Reply 1/2: Codex answers Claude.", output.getvalue())
+        self.assertEqual(set(results), {"claude", "codex"})
+
+    async def test_stop_ends_dialogue_before_any_cross_agent_reply(self):
+        codex = SlowEndpoint("codex")
+        claude = SlowEndpoint("claude")
+        broker = MODULE.Broker(codex, claude)
+
+        with redirect_stdout(io.StringIO()):
+            dialogue = asyncio.create_task(
+                broker.talk("Wait for George", reply_turns=6)
+            )
+            await asyncio.gather(codex.started.wait(), claude.started.wait())
+            await broker.stop()
+            await dialogue
+
+        self.assertEqual(len(codex.calls), 1)
+        self.assertEqual(len(claude.calls), 1)
 
     async def test_both_receive_the_same_automatically_retrieved_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
