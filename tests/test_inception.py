@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "inception.py"
@@ -98,6 +99,42 @@ class InceptionTests(unittest.TestCase):
         self.assertEqual(adopted["canonical_thread_id"], child)
         self.assertEqual(saved["parent_thread_id"], THREAD)
         self.assertEqual(saved["lineage_root_thread_id"], ROOT)
+
+    def test_server_recovers_from_a_dead_daemon_pid_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "app-server.pid"
+            dead_pid = 999_999_999
+            pid_path.write_text(json.dumps({"pid": dead_pid}), encoding="utf-8")
+            error = MODULE.InceptionError(
+                f"failed to read /proc/{dead_pid}/stat: No such file or directory"
+            )
+            with patch.object(
+                MODULE,
+                "run_json",
+                side_effect=[error, {"status": "connected"}],
+            ) as run:
+                result = MODULE.start_server(pid_path)
+
+            self.assertEqual(result, {"status": "connected"})
+            self.assertEqual(run.call_count, 2)
+            self.assertFalse(pid_path.exists())
+            self.assertTrue(
+                (Path(directory) / f"app-server.pid.stale-{dead_pid}").exists()
+            )
+
+    def test_server_does_not_remove_an_unrelated_pid_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "app-server.pid"
+            pid_path.write_text(json.dumps({"pid": 12345}), encoding="utf-8")
+            with patch.object(
+                MODULE,
+                "run_json",
+                side_effect=MODULE.InceptionError("authentication failed"),
+            ):
+                with self.assertRaisesRegex(MODULE.InceptionError, "authentication"):
+                    MODULE.start_server(pid_path)
+
+            self.assertTrue(pid_path.exists())
 
 
 if __name__ == "__main__":

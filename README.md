@@ -6,6 +6,29 @@ disagreements, mistakes, repairs, and shared references. A compact covenant and
 chronological microhistory provide recovery calibration underneath that lived
 thread; they are not presented as memories the receiving model personally had.
 
+## One-person install
+
+The person needs working, signed-in Codex and Claude Code command-line tools.
+On Termux, Claude Code must be available inside the Debian PRoot.
+
+```sh
+git clone https://github.com/gugosf114/collaboration-inception.git
+cd collaboration-inception
+chmod +x install.sh
+./install.sh
+inception cockpit
+```
+
+Then type:
+
+```text
+/both Say hello and explain what you can do.
+```
+
+George's phone keeps its native Codex lineage. A downloaded copy that does not
+have George's private rollout starts its own persistent Codex and Claude pair.
+The installer preserves any unrelated command it would otherwise replace.
+
 ## Live continuity runtime
 
 `runtime/state.json` points to the canonical lived thread. On George's phone,

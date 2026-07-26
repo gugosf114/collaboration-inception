@@ -120,8 +120,43 @@ def daemon_status() -> dict[str, Any]:
     return run_json(["codex", "app-server", "daemon", "version"])
 
 
-def start_server() -> dict[str, Any]:
-    return run_json(["codex", "remote-control", "start", "--json"])
+def recover_stale_daemon_pid(
+    error: InceptionError,
+    pid_path: Path = CODEX_HOME / "app-server-daemon" / "app-server.pid",
+) -> Path | None:
+    """Quarantine a dead daemon record only when the reported PID is gone."""
+    try:
+        record = json.loads(pid_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    pid = record.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    detail = str(error)
+    if f"/proc/{pid}/stat" not in detail or "No such file or directory" not in detail:
+        return None
+    if Path(f"/proc/{pid}/stat").exists():
+        return None
+
+    backup = pid_path.with_name(f"{pid_path.name}.stale-{pid}")
+    suffix = 1
+    while backup.exists():
+        backup = pid_path.with_name(f"{pid_path.name}.stale-{pid}-{suffix}")
+        suffix += 1
+    pid_path.replace(backup)
+    return backup
+
+
+def start_server(
+    pid_path: Path = CODEX_HOME / "app-server-daemon" / "app-server.pid",
+) -> dict[str, Any]:
+    command = ["codex", "remote-control", "start", "--json"]
+    try:
+        return run_json(command)
+    except InceptionError as exc:
+        if recover_stale_daemon_pid(exc, pid_path) is None:
+            raise
+    return run_json(command)
 
 
 def status_report(

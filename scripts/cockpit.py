@@ -29,6 +29,10 @@ from typing import Any, Callable, Sequence
 
 PROJECT = Path(__file__).resolve().parents[1]
 TERMUX_HOME = Path(os.environ.get("HOME", str(PROJECT.parent))).expanduser().resolve()
+CODEX_HOME = Path(
+    os.environ.get("CODEX_HOME", str(TERMUX_HOME / ".codex"))
+).expanduser().resolve()
+CODEX_SESSION_ROOT = CODEX_HOME / "sessions"
 CONTINUITY_STATE_PATH = PROJECT / "runtime" / "state.json"
 DEFAULT_STATE_PATH = PROJECT / "runtime" / "cockpit-state.json"
 DEFAULT_JOURNAL_PATH = PROJECT / "runtime" / "cockpit-events.jsonl"
@@ -202,6 +206,29 @@ def canonical_thread_id(path: Path = CONTINUITY_STATE_PATH) -> str:
     if not valid_uuid(thread_id):
         raise CockpitError(f"Invalid canonical Codex thread id: {thread_id!r}")
     return thread_id
+
+
+def local_codex_thread_exists(
+    thread_id: str, session_root: Path = CODEX_SESSION_ROOT
+) -> bool:
+    if not valid_uuid(thread_id) or not session_root.exists():
+        return False
+    return next(session_root.rglob(f"*{thread_id}*.jsonl"), None) is not None
+
+
+def select_codex_source_thread(
+    state: dict[str, Any],
+    requested: str | None,
+    continuity_path: Path = CONTINUITY_STATE_PATH,
+    session_root: Path = CODEX_SESSION_ROOT,
+) -> str | None:
+    """Use George's lineage when it exists; let a downloaded copy start fresh."""
+    source = state.get("codex_source_thread_id") or requested
+    if source is None:
+        source = canonical_thread_id(continuity_path)
+    if not valid_uuid(source):
+        raise CockpitError(f"Invalid Codex source thread id: {source!r}")
+    return source if local_codex_thread_exists(source, session_root) else None
 
 
 class StateStore:
@@ -1805,12 +1832,16 @@ async def async_main(args: argparse.Namespace) -> int:
     cwd, cwd_source = resolve_working_directory(
         args.project, args.cwd, state, launch_cwd=Path.cwd()
     )
-    source = (
-        state.get("codex_source_thread_id")
-        or args.codex_source
-        or canonical_thread_id()
+    source = select_codex_source_thread(
+        state,
+        args.codex_source,
+        continuity_path=CONTINUITY_STATE_PATH,
+        session_root=CODEX_SESSION_ROOT,
     )
-    state["codex_source_thread_id"] = source
+    if source:
+        state["codex_source_thread_id"] = source
+    else:
+        state.pop("codex_source_thread_id", None)
     state["cwd"] = str(cwd)
     state["cwd_source"] = cwd_source
     store.save()
