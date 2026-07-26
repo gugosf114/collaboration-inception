@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -47,6 +48,22 @@ class InstallTests(unittest.TestCase):
 
     def test_top_level_installer_parses(self):
         subprocess.run(["sh", "-n", str(ROOT / "install.sh")], check=True)
+
+    def test_preflight_reports_missing_image_support_before_runtime(self):
+        def fake_command(command):
+            if command[0] == "magick":
+                return False, "not found"
+            return True, "ok"
+
+        with (
+            patch.dict(MODULE.os.environ, {"PREFIX": ""}, clear=True),
+            patch.object(MODULE, "command_works", side_effect=fake_command),
+        ):
+            problems = MODULE.preflight()
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("ImageMagick", problems[0])
+        self.assertIn("screenshot pointing", problems[0])
 
 
 if __name__ == "__main__":

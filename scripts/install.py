@@ -49,6 +49,13 @@ def preflight() -> list[str]:
     if not ok:
         problems.append(f"Codex CLI is unavailable: {detail}")
 
+    ok, detail = command_works(["magick", "-version"])
+    if not ok:
+        problems.append(
+            "ImageMagick is unavailable; it is required for screenshot pointing: "
+            f"{detail}"
+        )
+
     prefix = os.environ.get("PREFIX", "")
     if "com.termux" in prefix:
         ok, detail = command_works(
@@ -146,7 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print("Inception is installed.")
     print(f"Launch: {args.bin_dir / 'inception'} cockpit")
-    print("Inside the cockpit: /both Say hello and explain what you can do.")
+    print("Inside the cockpit: /talk 2 Decide the strongest answer.")
+    print("Share an image: /look IMAGE What do you see?")
     if backups:
         print("Previous launchers were preserved:")
         for path in backups:
