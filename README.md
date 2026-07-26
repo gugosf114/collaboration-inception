@@ -82,6 +82,7 @@ At the `george>` prompt:
 
 ```text
 /both Is this plan sound?
+/talk 2 Decide the strongest way to repair this design.
 /claude Critique the risky assumption.
 /codex Check Claude's objection against the requirements.
 /act codex Implement your recommendation, test it, commit it, and push it.
@@ -95,8 +96,11 @@ At the `george>` prompt:
 `both: ...`, `claude: ...`, and `codex: ...` are equivalent natural forms;
 `claude!: ...` and `codex!: ...` are action shorthand. `/both` sends the exact
 same message to each agent independently in a hard read-only turn; neither sees
-the other's answer. `/pass` is the only cross-agent handoff and is also
-read-only. A direct `/claude` or `/codex` turn has real working tools and may
+the other's answer. `/talk` first gets both independent answers, then alternates
+the exact completed answers between Claude and Codex for the number of visible
+replies George granted. It is read-only, bounded to six replies, interruptible,
+and never continues on its own. `/pass` remains the manual cross-agent handoff
+and is also read-only. A direct `/claude` or `/codex` turn has real working tools and may
 inspect, edit, test, commit, and push when George's message requests it.
 `/act AGENT TEXT` makes that execution instruction unmistakable. Only one agent
 can receive a working turn at a time, every grant ends with the turn, and no

@@ -53,8 +53,10 @@ COCKPIT_INSTRUCTIONS = (
     "external actions. In WORK mode, tools are available and you should perform "
     "the work George's current message requests; do not invent materially different "
     "external actions. In ACTION mode, George explicitly wants execution rather "
-    "than another plan. A work or action grant ends with that turn. Never advance "
-    "or message the other agent automatically."
+    "than another plan. A work or action grant ends with that turn. Never initiate "
+    "another turn or contact the other agent on your own. In TALK mode, the cockpit "
+    "may deliver the other agent's exact completed answer only within the number of "
+    "replies George granted; respond directly when it does."
 )
 
 # Compatibility name for callers that imported the original constant.
@@ -68,6 +70,7 @@ HELP_TEXT = """Start from any Termux prompt:
 
 Inside the cockpit:
   /both TEXT              ask both independently in read-only discussion mode
+  /talk [REPLIES] TEXT    let both answer, then visibly reply to each other
   /claude TEXT            grant Claude one work-capable turn
   /codex TEXT             grant Codex one work-capable turn
   /act claude TEXT        tell Claude to execute now with working tools
@@ -86,10 +89,11 @@ Inside the cockpit:
   /help                   show this help
   /quit                   close the cockpit
 
-Natural forms also work: "both: ...", "claude: ...", "codex: ...", and
+Natural forms also work: "talk: ...", "both: ...", "claude: ...", "codex: ...", and
 "claude!: ..." / "codex!: ..." for explicit action.
 Direct Claude/Codex turns can inspect, edit, test, commit, and push when asked.
-No turn advances automatically, and /both never lets two agents edit at once.
+Only /talk advances through replies George granted in advance, and /both never
+lets two agents edit at once.
 """
 
 
@@ -1302,6 +1306,7 @@ class Broker:
         self.last_packet = ContinuityPacket()
         self.last: dict[str, str] = {}
         self.active_agents: set[str] = set()
+        self.dialogue_stop_requested = False
 
     async def ask(
         self, target: str, prompt: str, mode: str | None = None
@@ -1410,7 +1415,57 @@ class Broker:
             prompt += f"\n\nGeorge's instruction: {note}"
         return await self.ask(target, prompt, mode="discussion")
 
+    async def talk(
+        self, topic: str, reply_turns: int = 2
+    ) -> dict[str, TurnResult]:
+        if not 1 <= reply_turns <= 6:
+            raise CockpitError("A dialogue needs between 1 and 6 replies")
+        self.dialogue_stop_requested = False
+        print("[TALK] Opening: Claude and Codex answer George independently.")
+        opening = await self.ask(
+            "both",
+            (
+                "George is opening a visible Claude-Codex dialogue. Give your own "
+                "initial answer to the topic. Do not pretend you have seen the "
+                "other agent's answer yet.\n\n"
+                f"Topic: {topic}"
+            ),
+            mode="discussion",
+        )
+        latest = dict(opening)
+        if self.dialogue_stop_requested or any(
+            result.status != "completed" for result in opening.values()
+        ):
+            return latest
+
+        source, target = "claude", "codex"
+        for reply_number in range(1, reply_turns + 1):
+            if self.dialogue_stop_requested:
+                break
+            print(
+                f"[TALK] Reply {reply_number}/{reply_turns}: "
+                f"{target.title()} answers {source.title()}."
+            )
+            response = await self.pass_answer(
+                source,
+                target,
+                (
+                    "This is a direct, George-granted dialogue between you and "
+                    f"{source.title()}. Reply to {source.title()}, not merely to "
+                    "George. Challenge anything weak or wrong, state what you "
+                    "agree with, and move the shared answer forward. Do not merely "
+                    f"summarize.\n\nOriginal topic: {topic}"
+                ),
+            )
+            latest.update(response)
+            if any(result.status != "completed" for result in response.values()):
+                break
+            source, target = target, source
+        print("[TALK] The granted dialogue is finished. Control returns to George.")
+        return latest
+
     async def stop(self) -> None:
+        self.dialogue_stop_requested = True
         await asyncio.gather(
             *(self.endpoints[agent].interrupt() for agent in tuple(self.active_agents)),
             return_exceptions=True,
@@ -1423,6 +1478,23 @@ class OperatorCommand:
     target: str | None = None
     text: str = ""
     source: str | None = None
+    replies: int = 0
+
+
+def talk_command(text: str) -> OperatorCommand:
+    rest = text.strip()
+    if not rest:
+        raise CockpitError("Use /talk TEXT or /talk REPLIES TEXT")
+    replies = 2
+    parts = rest.split(maxsplit=1)
+    if parts[0].isdigit():
+        replies = int(parts[0])
+        if len(parts) != 2:
+            raise CockpitError("A numbered /talk also needs a topic")
+        rest = parts[1].strip()
+    if not 1 <= replies <= 6:
+        raise CockpitError("/talk replies must be between 1 and 6")
+    return OperatorCommand("talk", text=rest, replies=replies)
 
 
 def parse_operator_command(line: str) -> OperatorCommand:
@@ -1436,6 +1508,14 @@ def parse_operator_command(line: str) -> OperatorCommand:
         return OperatorCommand(
             "act", natural_action.group(1).lower(), natural_action.group(2).strip()
         )
+    natural_talk = re.match(
+        r"^talk(?:\s+(\d+))?\s*:\s*(.+)$", raw, re.IGNORECASE | re.DOTALL
+    )
+    if natural_talk:
+        prefix = (
+            f"{natural_talk.group(1)} " if natural_talk.group(1) is not None else ""
+        )
+        return talk_command(f"{prefix}{natural_talk.group(2)}")
     natural = re.match(
         r"^(both|claude|codex)\s*:\s*(.+)$", raw, re.IGNORECASE | re.DOTALL
     )
@@ -1444,7 +1524,10 @@ def parse_operator_command(line: str) -> OperatorCommand:
             "ask", natural.group(1).lower(), natural.group(2).strip()
         )
     if not raw.startswith("/"):
-        raise CockpitError("Start with /both, /claude, or /codex (or use 'both: ...')")
+        raise CockpitError(
+            "Start with /talk, /both, /claude, or /codex "
+            "(or use 'talk: ...')"
+        )
     name, _, rest = raw[1:].partition(" ")
     name = name.lower()
     rest = rest.strip()
@@ -1452,6 +1535,8 @@ def parse_operator_command(line: str) -> OperatorCommand:
         if not rest:
             raise CockpitError(f"/{name} needs a message")
         return OperatorCommand("ask", name, rest)
+    if name == "talk":
+        return talk_command(rest)
     if name == "act":
         parts = rest.split(maxsplit=1)
         if len(parts) != 2 or parts[0].lower() not in {"claude", "codex"}:
@@ -1601,6 +1686,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
     show_status(broker, state)
     print("\nTYPE ONE OF THESE:")
     print("/both YOUR QUESTION       Claude and Codex both answer")
+    print("/talk YOUR QUESTION       Claude and Codex answer each other visibly")
     print("/claude YOUR REQUEST      only Claude works; it may change files when asked")
     print("/codex YOUR REQUEST       only Codex works; it may change files when asked")
     print("/status                    show what is connected and which project is open")
@@ -1741,6 +1827,15 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     )
                 active_task = asyncio.create_task(
                     broker.ask(command.target, command.text, mode=mode)
+                )
+            elif command.kind == "talk":
+                running["active"] = True
+                print(
+                    "[WORKING] Claude and Codex are entering a visible read-only "
+                    f"dialogue with {command.replies} replies. Type /stop to interrupt."
+                )
+                active_task = asyncio.create_task(
+                    broker.talk(command.text, reply_turns=command.replies)
                 )
             elif command.kind == "act":
                 assert command.target
