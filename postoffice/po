@@ -181,7 +181,8 @@ listeners)
     echo "No tmux server running."
     exit 0
   fi
-  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_name}\t#{@po_listener}\t#{pane_current_command}' +    | awk -F '\t' '$3 == "1" {printf "%s\t%s\t%s\n", $1, $2, $4}'
+  tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_name}\t#{@po_listener}\t#{pane_current_command}' \
+    | awk -F '\t' '$3 == "1" {printf "%s\t%s\t%s\n", $1, $2, $4}'
   ;;
 blast)
   msg="$*"
@@ -190,7 +191,8 @@ blast)
     echo "No tmux server running. Live blast needs registered AI panes."
     exit 1
   fi
-  targets=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_listener}' +    | awk -F '\t' '$2 == "1" {print $1}')
+  targets=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{@po_listener}' \
+    | awk -F '\t' '$2 == "1" {print $1}')
   if [ -z "$targets" ]; then
     echo "No registered AI listeners. Inside each intended pane run: po register <name>"
     exit 1

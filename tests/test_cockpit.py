@@ -141,6 +141,45 @@ class ProjectResolutionTests(unittest.TestCase):
         self.assertIsNone(args.cwd)
 
 
+class PortableLineageTests(unittest.TestCase):
+    def test_downloaded_copy_starts_fresh_without_georges_rollout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            continuity = base / "state.json"
+            continuity.write_text(
+                json.dumps({"canonical_thread_id": THREAD}), encoding="utf-8"
+            )
+
+            source = MODULE.select_codex_source_thread(
+                {},
+                None,
+                continuity_path=continuity,
+                session_root=base / "empty-sessions",
+            )
+
+        self.assertIsNone(source)
+
+    def test_georges_install_keeps_the_native_lineage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            continuity = base / "state.json"
+            continuity.write_text(
+                json.dumps({"canonical_thread_id": THREAD}), encoding="utf-8"
+            )
+            rollout = base / "sessions" / f"rollout-{THREAD}.jsonl"
+            rollout.parent.mkdir()
+            rollout.write_text("{}\n", encoding="utf-8")
+
+            source = MODULE.select_codex_source_thread(
+                {},
+                None,
+                continuity_path=continuity,
+                session_root=base / "sessions",
+            )
+
+        self.assertEqual(source, THREAD)
+
+
 class StateTests(unittest.TestCase):
     def test_state_round_trip_is_private_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -66,6 +66,10 @@ class PostOfficeTests(unittest.TestCase):
         for script in (ROOT / "postoffice" / "po", ROOT / "postoffice" / "collect.sh"):
             subprocess.run(["bash", "-n", str(script)], check=True)
 
+    def test_tmux_commands_do_not_contain_the_old_stray_argument(self):
+        source = (ROOT / "postoffice" / "po").read_text(encoding="utf-8")
+        self.assertNotIn("' +    | awk", source)
+
 
 if __name__ == "__main__":
     unittest.main()
