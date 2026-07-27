@@ -45,9 +45,10 @@ def command_works(command: Sequence[str]) -> tuple[bool, str]:
 
 def preflight() -> list[str]:
     problems: list[str] = []
+    providers: list[str] = []
     ok, detail = command_works(["codex", "--version"])
-    if not ok:
-        problems.append(f"Codex CLI is unavailable: {detail}")
+    if ok:
+        providers.append("Codex")
 
     ok, detail = command_works(["magick", "-version"])
     if not ok:
@@ -61,12 +62,23 @@ def preflight() -> list[str]:
         ok, detail = command_works(
             ["proot-distro", "login", "debian", "--", "claude", "--version"]
         )
-        if not ok:
-            problems.append(f"Claude Code is unavailable inside Debian: {detail}")
+        if ok:
+            providers.append("Claude")
     else:
         ok, detail = command_works(["claude", "--version"])
-        if not ok:
-            problems.append(f"Claude Code is unavailable: {detail}")
+        if ok:
+            providers.append("Claude")
+    google_ok, _ = command_works(["agy", "--version"])
+    if not google_ok:
+        google_ok, _ = command_works(["gemini", "--version"])
+    if google_ok:
+        providers.append("Antigravity")
+    if len(providers) < 2:
+        found = ", ".join(providers) or "none"
+        problems.append(
+            "Inception needs any two model CLIs (Claude, Codex, or "
+            f"Antigravity); found: {found}"
+        )
     return problems
 
 
@@ -101,6 +113,9 @@ def install(bin_dir: Path, skip_preflight: bool = False) -> list[Path]:
     required = (
         PROJECT / "scripts" / "inception.py",
         PROJECT / "scripts" / "cockpit.py",
+        PROJECT / "scripts" / "operating_room.py",
+        PROJECT / "scripts" / "capture_browser.cjs",
+        PROJECT / "scripts" / "point_browser.cjs",
         PROJECT / "postoffice" / "po",
         PROJECT / "context" / "WORKING_COVENANT.md",
         PROJECT / "context" / "MICROHISTORY_V1.md",
@@ -153,8 +168,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print("Inception is installed.")
     print(f"Launch: {args.bin_dir / 'inception'} cockpit")
-    print("Inside the cockpit: /talk 2 Decide the strongest answer.")
-    print("Share an image: /look IMAGE What do you see?")
+    print("Use any two signed-in models; Codex is optional.")
+    print("Inside the cockpit: /talk claude antigravity 2 YOUR QUESTION")
     if backups:
         print("Previous launchers were preserved:")
         for path in backups:

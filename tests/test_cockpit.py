@@ -151,6 +151,81 @@ class CommandTests(unittest.TestCase):
                 with self.assertRaises(MODULE.CockpitError):
                     MODULE.parse_operator_command(command)
 
+    def test_parses_three_provider_council_surface_and_arena_controls(self):
+        google = MODULE.parse_operator_command("/gemini inspect this")
+        talk = MODULE.parse_operator_command(
+            "/talk claude antigravity 4 Challenge this"
+        )
+        council = MODULE.parse_operator_command("/council 2 Decide this")
+        browser = MODULE.parse_operator_command(
+            '/browser-point "Delete account" Why is this dangerous?'
+        )
+        exact_browser = MODULE.parse_operator_command(
+            "/browser collaboration-inception :: What is open?"
+        )
+        exact_point = MODULE.parse_operator_command(
+            "/browser-point collaboration-inception :: Code :: Explain this tab"
+        )
+        arena = MODULE.parse_operator_command(
+            '/arena claude agy --test "python -m unittest" :: repair it'
+        )
+
+        self.assertEqual((google.kind, google.target), ("ask", "antigravity"))
+        self.assertEqual(talk.participants, ("claude", "antigravity"))
+        self.assertEqual(talk.replies, 4)
+        self.assertEqual((council.kind, council.replies), ("council", 2))
+        self.assertEqual(browser.source, "Delete account")
+        self.assertEqual(exact_browser.source, "collaboration-inception")
+        self.assertEqual(exact_browser.text, "What is open?")
+        self.assertEqual(exact_point.image, "collaboration-inception")
+        self.assertEqual(exact_point.source, "Code")
+        self.assertEqual(arena.participants, ("claude", "antigravity"))
+        self.assertEqual(arena.test_command, "python -m unittest")
+
+    def test_parses_memory_guard_recovery_and_winner_controls(self):
+        correction = MODULE.parse_operator_command(
+            "/correct codex Do not call placeholders complete"
+        )
+        outcome = MODULE.parse_operator_command(
+            "/outcome codex testing success 70 tests passed"
+        )
+        recover = MODULE.parse_operator_command(
+            "/off claude It became generic after compaction"
+        )
+        choose = MODULE.parse_operator_command("/choose run-123 gemini")
+
+        self.assertEqual(correction.target, "codex")
+        self.assertEqual(outcome.category, "testing")
+        self.assertEqual(outcome.verdict, "success")
+        self.assertEqual(outcome.text, "70 tests passed")
+        self.assertEqual(recover.kind, "recover")
+        self.assertEqual(choose.target, "antigravity")
+        self.assertEqual(choose.run_id, "run-123")
+
+
+class ProviderSelectionTests(unittest.TestCase):
+    def test_codex_is_not_required_when_claude_and_antigravity_are_available(self):
+        selected = MODULE.select_providers(
+            None,
+            {},
+            available=("claude", "antigravity"),
+        )
+
+        self.assertEqual(selected, ("claude", "antigravity"))
+
+    def test_aliases_select_any_explicit_pair(self):
+        selected = MODULE.select_providers(
+            "gemini,codex",
+            {},
+            available=("claude", "codex", "antigravity"),
+        )
+
+        self.assertEqual(selected, ("antigravity", "codex"))
+
+    def test_one_model_is_rejected(self):
+        with self.assertRaisesRegex(MODULE.CockpitError, "any two"):
+            MODULE.select_providers(None, {}, available=("claude",))
+
 
 class ProjectResolutionTests(unittest.TestCase):
     @staticmethod
@@ -214,8 +289,9 @@ class SharedImageTests(unittest.TestCase):
             )
 
             self.assertEqual(staged.read_bytes(), b"image bytes")
-            self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(staged.parent.stat().st_mode & 0o777, 0o700)
+            if os.name != "nt":
+                self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(staged.parent.stat().st_mode & 0o777, 0o700)
 
     def test_marks_georges_point_with_a_circle_and_crosshair(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +324,19 @@ class SharedImageTests(unittest.TestCase):
 
 
 class PortableLineageTests(unittest.TestCase):
+    def test_copy_without_private_continuity_state_starts_fresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+
+            source = MODULE.select_codex_source_thread(
+                {},
+                None,
+                continuity_path=base / "missing-state.json",
+                session_root=base / "missing-sessions",
+            )
+
+        self.assertIsNone(source)
+
     def test_downloaded_copy_starts_fresh_without_georges_rollout(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -303,7 +392,8 @@ class StateTests(unittest.TestCase):
             loaded = MODULE.StateStore(path).load()
 
             self.assertEqual(loaded["claude_session_id"], CLAUDE_SESSION)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_rejects_invalid_persisted_session(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -553,6 +643,80 @@ class ClaudePermissionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await permission(other), "deny")
 
 
+class AntigravityEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_antigravity_uses_sandboxed_print_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            helper = base / "fake_agy.py"
+            helper.write_text(
+                "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            endpoint = MODULE.AntigravityEndpoint(
+                base,
+                command=[sys.executable, str(helper)],
+                instructions="SHARED CONTRACT",
+            )
+
+            result = await endpoint.ask(
+                "Inspect this.",
+                lambda _text: None,
+                working=False,
+            )
+            arguments = json.loads(result.text)
+
+            self.assertIn("--sandbox", arguments)
+            self.assertIn("--print", arguments)
+            self.assertIn("SHARED CONTRACT", arguments[-1])
+            self.assertTrue(endpoint.authenticated)
+
+    async def test_legacy_gemini_can_run_without_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            helper = base / "gemini-fake.py"
+            helper.write_text(
+                "import json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            endpoint = MODULE.AntigravityEndpoint(
+                base,
+                command=[sys.executable, str(helper)],
+                instructions="SHARED CONTRACT",
+            )
+
+            result = await endpoint.ask(
+                "Inspect this.",
+                lambda _text: None,
+                working=True,
+            )
+            arguments = json.loads(result.text)
+
+            self.assertTrue(endpoint.legacy_gemini)
+            self.assertIn("--session-id", arguments)
+            self.assertIn("yolo", arguments)
+            self.assertIn("--prompt", arguments)
+
+    async def test_antigravity_does_not_mistake_auth_timeout_for_an_answer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            helper = base / "fake_agy.py"
+            helper.write_text(
+                "print('Authentication required.')\n"
+                "print('Waiting for authentication (timeout 30s)...')\n"
+                "print('Error: authentication timed out.')\n",
+                encoding="utf-8",
+            )
+            endpoint = MODULE.AntigravityEndpoint(
+                base,
+                command=[sys.executable, str(helper)],
+            )
+
+            with self.assertRaisesRegex(MODULE.CockpitError, "needs sign-in"):
+                await endpoint.ask("Inspect this.", lambda _text: None)
+
+            self.assertFalse(endpoint.authenticated)
+
+
 class FakeCodexEndpoint(MODULE.CodexEndpoint):
     def __init__(self):
         super().__init__(
@@ -623,7 +787,7 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turns[1]["sandboxPolicy"]["type"], "dangerFullAccess")
         self.assertEqual(turns[0]["approvalPolicy"], "never")
         self.assertEqual(turns[1]["approvalPolicy"], "never")
-        self.assertEqual(turns[1]["cwd"], "/tmp")
+        self.assertEqual(turns[1]["cwd"], str(endpoint.cwd))
 
     async def test_codex_receives_the_shared_image_as_native_local_input(self):
         endpoint = FakeCodexEndpoint()
@@ -641,9 +805,29 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
             turn["input"],
             [
                 {"type": "text", "text": "inspect the marked area"},
-                {"type": "localImage", "path": str(image)},
+                {"type": "localImage", "path": str(image.resolve())},
             ],
         )
+
+    async def test_codex_close_releases_the_owning_subprocess_transport(self):
+        endpoint = FakeCodexEndpoint()
+
+        class Transport:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        transport = Transport()
+        endpoint.process = type(
+            "ExitedProcess",
+            (),
+            {"returncode": 0, "_transport": transport},
+        )()
+
+        await endpoint.close()
+
+        self.assertTrue(transport.closed)
 
 
 class FakeEndpoint:
@@ -683,6 +867,55 @@ class SlowEndpoint(FakeEndpoint):
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_three_model_council_challenges_every_opening_answer(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        antigravity = FakeEndpoint("antigravity")
+        broker = MODULE.Broker(codex, claude, antigravity=antigravity)
+
+        with redirect_stdout(io.StringIO()):
+            results = await broker.council("Find the strongest repair.", rounds=1)
+
+        self.assertEqual(set(results), {"claude", "codex", "antigravity"})
+        self.assertEqual(len(codex.calls), 2)
+        self.assertEqual(len(claude.calls), 2)
+        self.assertEqual(len(antigravity.calls), 2)
+        for endpoint in (codex, claude, antigravity):
+            challenge = endpoint.calls[1][0]
+            self.assertIn("Claude", challenge)
+            self.assertIn("Codex", challenge)
+            self.assertIn("Antigravity", challenge)
+
+    async def test_default_guard_checks_a_draft_before_the_only_working_turn(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        broker = MODULE.Broker(codex, claude)
+
+        with redirect_stdout(io.StringIO()):
+            results = await broker.guarded_ask(
+                "codex", "Repair and test it.", mode="action"
+            )
+
+        self.assertEqual(set(results), {"codex"})
+        self.assertEqual([working for _, working in codex.calls], [False, True])
+        self.assertEqual([working for _, working in claude.calls], [False])
+        self.assertIn("Claude's critique", codex.calls[-1][0])
+
+    async def test_three_model_guard_uses_both_independent_critics(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        antigravity = FakeEndpoint("antigravity")
+        broker = MODULE.Broker(codex, claude, antigravity=antigravity)
+
+        with redirect_stdout(io.StringIO()):
+            await broker.guarded_ask("codex", "Repair and prove it.", mode="work")
+
+        final_prompt = codex.calls[-1][0]
+        self.assertIn("Claude's critique", final_prompt)
+        self.assertIn("Antigravity's critique", final_prompt)
+        self.assertEqual([working for _, working in claude.calls], [False])
+        self.assertEqual([working for _, working in antigravity.calls], [False])
+
     async def test_plain_status_names_project_and_both_connections(self):
         codex = FakeEndpoint("codex")
         claude = FakeEndpoint("claude")

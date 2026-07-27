@@ -9,13 +9,24 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Compile scripts
         run: python -m compileall -q scripts postoffice
+      - name: Check browser bridges
+        run: |
+          node --check scripts/capture_browser.cjs
+          node --check scripts/point_browser.cjs
       - name: Run tests
         run: python -m unittest discover -s tests -v

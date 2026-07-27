@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""George-controlled live switchboard for Codex and Claude.
+"""George-controlled live switchboard for multiple model command-line tools.
 
 The cockpit deliberately has no automatic agent-to-agent loop. George grants
 every turn, and forwarding an answer is an explicit operator command.
@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import fcntl
 import json
 import os
 import re
@@ -28,9 +27,46 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # Native Windows
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX
+    msvcrt = None  # type: ignore[assignment]
+
+try:
+    from operating_room import (
+        DEFAULT_ARENA_ROOT,
+        DEFAULT_LEDGER_PATH,
+        DEFAULT_SURFACE_ROOT,
+        ArenaManager,
+        OperatingRoomError,
+        RelationshipLedger,
+        SurfaceHub,
+        deterministic_objections,
+    )
+except ModuleNotFoundError:
+    from scripts.operating_room import (  # type: ignore[no-redef]
+        DEFAULT_ARENA_ROOT,
+        DEFAULT_LEDGER_PATH,
+        DEFAULT_SURFACE_ROOT,
+        ArenaManager,
+        OperatingRoomError,
+        RelationshipLedger,
+        SurfaceHub,
+        deterministic_objections,
+    )
+
 
 PROJECT = Path(__file__).resolve().parents[1]
-TERMUX_HOME = Path(os.environ.get("HOME", str(PROJECT.parent))).expanduser().resolve()
+TERMUX_HOME = Path(
+    os.environ.get("HOME")
+    or os.environ.get("USERPROFILE")
+    or str(Path.home())
+).expanduser().resolve()
 CODEX_HOME = Path(
     os.environ.get("CODEX_HOME", str(TERMUX_HOME / ".codex"))
 ).expanduser().resolve()
@@ -44,6 +80,7 @@ DEFAULT_ATTACHMENT_DIR = PROJECT / "runtime" / "attachments"
 DEFAULT_COVENANT_PATH = PROJECT / "context" / "WORKING_COVENANT.md"
 DEFAULT_MICROHISTORY_PATH = PROJECT / "context" / "MICROHISTORY_V1.md"
 IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
+PROVIDER_NAMES = ("claude", "codex", "antigravity")
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 # Claude emits an image read as one base64 JSONL record. Asyncio's 64 KiB
 # default stream limit cuts that record in half and disconnects the endpoint.
@@ -54,7 +91,7 @@ UUID_RE = re.compile(
 )
 
 COCKPIT_INSTRUCTIONS = (
-    "You are one endpoint in George's supervised Claude-Codex cockpit. "
+    "You are one endpoint in George's supervised multi-model cockpit. "
     "George grants every turn. Each delivered message starts with a cockpit mode "
     "that controls the turn. In DISCUSSION mode, inspect read-only evidence when "
     "helpful but do not edit files, run mutating commands, commit, push, or take "
@@ -72,38 +109,53 @@ DISCUSSION_INSTRUCTIONS = COCKPIT_INSTRUCTIONS
 
 TURN_MODES = frozenset({"discussion", "work", "action"})
 
-HELP_TEXT = """Start from any Termux prompt:
-  inception cockpit                    resume the last project
-  inception cockpit agent bridge       switch to agent-bridge
+HELP_TEXT = """Launch from Termux, PowerShell, Linux, or macOS:
+  inception cockpit [PROJECT]                    open or resume the cockpit
+  inception cockpit --providers claude,agy       choose installed models
 
-Inside the cockpit:
-  /both TEXT              ask both independently in read-only discussion mode
-  /talk [REPLIES] TEXT    let both answer, then visibly reply to each other
-  /look IMAGE TEXT        give both the same screenshot or image
-  /point IMAGE X Y TEXT   mark one spot, then let both discuss it
-  /claude TEXT            grant Claude one work-capable turn
-  /codex TEXT             grant Codex one work-capable turn
-  /act claude TEXT        tell Claude to execute now with working tools
-  /act codex TEXT         tell Codex to execute now with working tools
-  /pass claude codex      send Claude's last answer to Codex
-  /pass codex claude      send Codex's last answer to Claude
-  /pass SOURCE TARGET NOTE  forward with George's added instruction
-  /last [claude|codex]    show the most recent complete answer
-  /context                show the relationship covenant and continuity status
-  /context full           also show the chronological relationship examples
-  /context on|off         enable or disable retrieved evidence for this run
-  /status                 show project and whether both agents are connected
-  /projects               show project names accepted by the launcher
-  /sessions               show the persistent pair
-  /stop                   interrupt the running turn(s)
-  /help                   show this help
-  /quit                   close the cockpit
+Think together:
+  /both QUESTION                                 default pair, independent
+  /all QUESTION                                  every model, independent
+  /talk [MODEL MODEL] [1-6] QUESTION             visible bounded dialogue
+  /council [1-3] QUESTION                        all three challenge each other
+  /pass SOURCE TARGET [NOTE]                     forward one complete answer
+  /last [MODEL]                                  show the latest answer
 
-Natural forms also work: "talk: ...", "both: ...", "claude: ...", "codex: ...", and
-"claude!: ..." / "codex!: ..." for explicit action.
-Direct Claude/Codex turns can inspect, edit, test, commit, and push when asked.
-Only /talk advances through replies George granted in advance, and /both never
-lets two agents edit at once.
+Work:
+  /MODEL REQUEST                                 one checked working turn
+  /act MODEL REQUEST                             explicit execution turn
+  /guard on|off|status                           pre-delivery objection checker
+  /arena [MODEL MODEL] [--test "CMD"] :: REQUEST isolated competing builds
+  /choose [ARENA_ID] MODEL                       apply the chosen attempt
+  /undo [ARENA_ID]                               revert a chosen attempt safely
+  /replay [ARENA_ID]                             show the complete arena record
+
+Share live evidence:
+  /file "PATH" QUESTION                          private file copy
+  /look "IMAGE" QUESTION                         same image to both
+  /point "IMAGE" X Y QUESTION                    mark one pixel location
+  /screen QUESTION                               capture the live screen
+  /browser [TAB ::] QUESTION                     capture a live browser tab
+  /browser-point "ELEMENT" QUESTION              mark a live page element
+  /browser-point TAB :: ELEMENT :: QUESTION      choose its browser tab
+  /listen                                        speak the next command
+
+Control and memory:
+  /steer [MODEL] GUIDANCE                        redirect a running turn
+  /stop                                          interrupt running work
+  /memory                                        corrections, promises, outcomes
+  /correct MODEL TEXT                            record an explicit correction
+  /promise add MODEL TEXT                        record a promise
+  /promise done ID [NOTE]                        resolve a promise
+  /outcome MODEL CATEGORY VERDICT [NOTE]         record measured authority
+  /recover MODEL REASON                          fresh session, shared memory kept
+  /context [full|on|off]                         continuity evidence controls
+  /status | /providers | /projects | /sessions   inspect the cockpit
+  /help | /quit
+
+MODEL can be claude, codex, or antigravity. "agy" and "gemini" are aliases.
+Natural forms such as "talk: ...", "claude: ...", and "agy!: ..." also work.
+Group turns are read-only. Only one model gets working tools at a time.
 """
 
 
@@ -133,22 +185,143 @@ def git_project_root(path: Path) -> Path | None:
 
 
 def discover_projects(home: Path = TERMUX_HOME) -> list[Path]:
-    try:
-        children = list(home.iterdir())
-    except OSError:
-        return []
+    roots = (
+        home,
+        home / "Documents" / "GitHub",
+        home / "source" / "repos",
+    )
+    children: list[Path] = []
+    for root in roots:
+        try:
+            children.extend(root.iterdir())
+        except OSError:
+            continue
+    found = {
+        child.resolve()
+        for child in children
+        if child.is_dir() and (child / ".git").exists()
+    }
     return sorted(
-        (
-            child.resolve()
-            for child in children
-            if child.is_dir() and (child / ".git").exists()
-        ),
+        found,
         key=lambda child: child.name.lower(),
     )
 
 
 def project_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def available_providers() -> tuple[str, ...]:
+    available: list[str] = []
+    prefix = os.environ.get("PREFIX", "")
+    claude_available = bool(
+        os.environ.get("GEORGE_COCKPIT_CLAUDE_COMMAND")
+        or shutil.which("claude")
+        or ("com.termux" in prefix and shutil.which("proot-distro"))
+    )
+    if claude_available:
+        available.append("claude")
+    if shutil.which("codex"):
+        available.append("codex")
+    if shutil.which("agy") or shutil.which("gemini"):
+        available.append("antigravity")
+    return tuple(available)
+
+
+def executable_command(name: str, *arguments: str) -> list[str]:
+    """Resolve CLI shims so Python can launch them on Unix and native Windows."""
+    resolved = shutil.which(name) or name
+    if os.name != "nt":
+        return [resolved, *arguments]
+    suffix = Path(resolved).suffix.lower()
+    if suffix in {".cmd", ".bat"}:
+        # npm's PowerShell wrapper buffers piped stdin until EOF. That deadlocks
+        # long-lived JSON protocols such as `codex app-server --stdio`. Resolve
+        # the JavaScript entrypoint and execute Node directly instead.
+        try:
+            shim = Path(resolved).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            shim = ""
+        match = re.search(
+            r'"%dp0%[\\/](?P<entry>[^"]+\.js)"',
+            shim,
+            re.IGNORECASE,
+        )
+        if match:
+            entry = Path(resolved).parent.joinpath(
+                *re.split(r"[\\/]+", match.group("entry"))
+            )
+            local_node = Path(resolved).parent / "node.exe"
+            node = (
+                str(local_node)
+                if local_node.is_file()
+                else (shutil.which("node.exe") or shutil.which("node"))
+            )
+            if node and entry.is_file():
+                return [node, str(entry), *arguments]
+        powershell_script = str(Path(resolved).with_suffix(".ps1"))
+        if Path(powershell_script).is_file():
+            powershell = shutil.which("powershell.exe") or "powershell.exe"
+            return [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                powershell_script,
+                *arguments,
+            ]
+        command = subprocess.list2cmdline([resolved, *arguments])
+        return [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d",
+            "/s",
+            "/c",
+            command,
+        ]
+    return [resolved, *arguments]
+
+
+def select_providers(
+    requested: str | None,
+    state: dict[str, Any],
+    available: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    installed = tuple(available_providers() if available is None else available)
+    if requested:
+        raw = requested.strip().lower()
+        if raw == "all":
+            selected = list(installed)
+        else:
+            selected = []
+            for value in raw.split(","):
+                provider = provider_name(value)
+                if not provider:
+                    raise CockpitError(f"Unknown provider: {value!r}")
+                if provider not in selected:
+                    selected.append(provider)
+    else:
+        saved = state.get("providers")
+        selected = (
+            [provider for provider in saved if provider in installed]
+            if isinstance(saved, list)
+            else list(installed)
+        )
+        if len(selected) < 2:
+            selected = list(installed)
+    missing = [provider for provider in selected if provider not in installed]
+    if missing:
+        raise CockpitError(
+            f"Requested provider is not installed: {', '.join(missing)}"
+        )
+    if len(selected) < 2:
+        found = ", ".join(installed) or "none"
+        raise CockpitError(
+            "Inception needs any two installed model CLIs. "
+            f"Available providers: {found}"
+        )
+    return tuple(selected)
 
 
 def resolve_named_project(name: str, home: Path = TERMUX_HOME) -> Path:
@@ -177,7 +350,8 @@ def resolve_named_project(name: str, home: Path = TERMUX_HOME) -> Path:
             f"Project name {requested!r} matches more than one folder: {matches}"
         )
     raise CockpitError(
-        f"I cannot find project {requested!r} on this phone. Available projects: {names}"
+        f"I cannot find project {requested!r} on this computer. "
+        f"Available projects: {names}"
     )
 
 
@@ -239,6 +413,8 @@ def select_codex_source_thread(
     """Use George's lineage when it exists; let a downloaded copy start fresh."""
     source = state.get("codex_source_thread_id") or requested
     if source is None:
+        if not continuity_path.is_file():
+            return None
         source = canonical_thread_id(continuity_path)
     if not valid_uuid(source):
         raise CockpitError(f"Invalid Codex source thread id: {source!r}")
@@ -266,6 +442,26 @@ class StateStore:
             value = data.get(key)
             if value is not None and not valid_uuid(value):
                 raise CockpitError(f"Invalid {key}: {value!r}")
+        antigravity = data.get("antigravity_conversation_id")
+        if antigravity is not None and (
+            not isinstance(antigravity, str)
+            or not antigravity.strip()
+            or len(antigravity) > 300
+        ):
+            raise CockpitError(
+                f"Invalid antigravity_conversation_id: {antigravity!r}"
+            )
+        providers = data.get("providers")
+        if providers is not None and (
+            not isinstance(providers, list)
+            or len(providers) < 2
+            or any(provider not in PROVIDER_NAMES for provider in providers)
+            or len(set(providers)) != len(providers)
+        ):
+            raise CockpitError(f"Invalid cockpit providers: {providers!r}")
+        guard = data.get("guard_enabled")
+        if guard is not None and not isinstance(guard, bool):
+            raise CockpitError(f"Invalid guard_enabled: {guard!r}")
         self.data = data
         return data
 
@@ -589,7 +785,7 @@ class ContinuityEngine:
                 f"Episode {episode_id} ({episode.get('at') or 'date unknown'})",
                 f"George: {compact_text(episode['prompt'], 600)}",
             ]
-            for agent in ("claude", "codex"):
+            for agent in PROVIDER_NAMES:
                 answer = episode["answers"].get(agent)
                 if answer:
                     lines.append(f"{agent.title()}: {compact_text(answer, 650)}")
@@ -646,7 +842,7 @@ class ContinuityEngine:
                     continue
                 agent = record.get("agent")
                 text = record.get("text")
-                if agent in {"claude", "codex"} and isinstance(text, str) and text:
+                if agent in PROVIDER_NAMES and isinstance(text, str) and text:
                     episodes[episode_id]["answers"][agent] = text
         return [
             episodes[episode_id]
@@ -658,16 +854,32 @@ class ContinuityEngine:
 class CockpitLock:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = path.open("a+")
+        self.handle = path.open("a+b")
         try:
-            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            if os.name == "nt":
+                if msvcrt is None:
+                    raise OSError("Windows file locking is unavailable")
+                if path.stat().st_size == 0:
+                    self.handle.write(b"\0")
+                    self.handle.flush()
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                if fcntl is None:
+                    raise OSError("POSIX file locking is unavailable")
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
             self.handle.close()
             raise CockpitError("Another cockpit is already running") from exc
 
     def close(self) -> None:
         with contextlib.suppress(OSError):
-            fcntl.flock(self.handle, fcntl.LOCK_UN)
+            if os.name == "nt":
+                if msvcrt is not None:
+                    self.handle.seek(0)
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(self.handle, fcntl.LOCK_UN)
         self.handle.close()
 
 
@@ -727,6 +939,7 @@ class CodexEndpoint:
         cwd: Path,
         thread_id: str | None,
         source_thread_id: str | None,
+        thread_callback: Callable[[str], None] | None = None,
         error_log: Path = DEFAULT_ERROR_LOG,
         command: Sequence[str] | None = None,
         instructions: str = DISCUSSION_INSTRUCTIONS,
@@ -734,8 +947,13 @@ class CodexEndpoint:
         self.cwd = cwd
         self.thread_id = thread_id
         self.source_thread_id = source_thread_id
+        self.thread_callback = thread_callback
         self.error_log = error_log
-        self.command = list(command or ("codex", "app-server", "--stdio"))
+        self.command = (
+            list(command)
+            if command
+            else executable_command("codex", "app-server", "--stdio")
+        )
         self.instructions = instructions
         self.process: asyncio.subprocess.Process | None = None
         self.reader_task: asyncio.Task[None] | None = None
@@ -746,6 +964,7 @@ class CodexEndpoint:
         self.closing = False
 
     async def start(self) -> str:
+        self.closing = False
         self.error_log.parent.mkdir(parents=True, exist_ok=True)
         self.error_handle = self.error_log.open("ab", buffering=0)
         self.process = await asyncio.create_subprocess_exec(
@@ -795,6 +1014,8 @@ class CodexEndpoint:
         if not valid_uuid(thread_id):
             raise CockpitError(f"Codex returned an invalid thread id: {thread_id!r}")
         self.thread_id = thread_id
+        if self.thread_callback:
+            self.thread_callback(thread_id)
         return thread_id
 
     async def ask(
@@ -812,6 +1033,17 @@ class CodexEndpoint:
         turn = _CodexTurn(done=loop.create_future(), emit=emit, working=working)
         self.active = turn
         try:
+            shared_files = tuple(path.expanduser().resolve() for path in attachments)
+            non_images = [
+                path for path in shared_files if path.suffix.lower() not in IMAGE_SUFFIXES
+            ]
+            if non_images:
+                paths = "\n".join(f"- {path}" for path in non_images)
+                prompt = (
+                    f"{prompt}\n\n[Shared cockpit files]\n"
+                    "Inspect these exact read-only paths before answering:\n"
+                    f"{paths}\n[End shared cockpit files]"
+                )
             sandbox_policy: dict[str, Any]
             if working:
                 sandbox_policy = {"type": "dangerFullAccess"}
@@ -825,7 +1057,8 @@ class CodexEndpoint:
                         {"type": "text", "text": prompt},
                         *(
                             {"type": "localImage", "path": str(path)}
-                            for path in attachments
+                            for path in shared_files
+                            if path.suffix.lower() in IMAGE_SUFFIXES
                         ),
                     ],
                     # turn/start overrides persist, so every turn explicitly resets
@@ -842,6 +1075,28 @@ class CodexEndpoint:
         finally:
             if self.active is turn:
                 self.active = None
+
+    async def steer(self, text: str) -> bool:
+        turn = self.active
+        if turn is None or not turn.turn_id or not self.thread_id:
+            return False
+        await self._request(
+            "turn/steer",
+            {
+                "threadId": self.thread_id,
+                "expectedTurnId": turn.turn_id,
+                "input": [{"type": "text", "text": text}],
+            },
+            timeout=30,
+        )
+        return True
+
+    async def reset(self) -> str:
+        """Preserve the old thread and start a fresh trajectory."""
+        await self.close()
+        self.thread_id = None
+        self.source_thread_id = None
+        return await self.start()
 
     async def interrupt(self) -> None:
         turn = self.active
@@ -864,6 +1119,10 @@ class CodexEndpoint:
         if process and process.returncode is None:
             if process.stdin:
                 process.stdin.close()
+                with contextlib.suppress(
+                    AttributeError, BrokenPipeError, ConnectionResetError
+                ):
+                    await process.stdin.wait_closed()
             try:
                 await asyncio.wait_for(process.wait(), timeout=3)
             except asyncio.TimeoutError:
@@ -873,10 +1132,21 @@ class CodexEndpoint:
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-        if self.reader_task and not self.reader_task.done():
-            self.reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+        self.process = None
+        if self.reader_task:
+            if not self.reader_task.done():
+                self.reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, CockpitError):
                 await self.reader_task
+            self.reader_task = None
+        # Python 3.14's Windows Proactor can leave the owning subprocess
+        # transport open even after process.wait() and stdout EOF. Close that
+        # transport explicitly so a clean cockpit exit prints no destructor
+        # traceback. asyncio exposes no public Process.close() equivalent.
+        transport = getattr(process, "_transport", None) if process else None
+        if transport is not None:
+            transport.close()
+            await asyncio.sleep(0)
         if self.error_handle:
             self.error_handle.close()
 
@@ -1079,7 +1349,7 @@ def default_claude_command(
             str(cwd),
             *flags,
         ]
-    return flags
+    return executable_command(flags[0], *flags[1:])
 
 
 class ClaudeEndpoint:
@@ -1123,18 +1393,27 @@ class ClaudeEndpoint:
         command = self.command_override or default_claude_command(
             self.cwd, self.session_id, self.instructions
         )
+        process_group: dict[str, Any]
+        if os.name == "nt":
+            process_group = {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP
+            }
+        else:
+            process_group = {"start_new_session": True}
         self.process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self.error_handle,
             cwd=self.cwd,
-            start_new_session=True,
             limit=CLAUDE_STREAM_LIMIT,
+            **process_group,
         )
         self.reader_task = asyncio.create_task(self._read_loop(self.process))
         await self._control_request(
-            {"subtype": "initialize", "hooks": None}, timeout=60
+            # A cold Claude start through Termux -> Debian PRoot can take more
+            # than a minute even when the same build starts faster on Windows.
+            {"subtype": "initialize", "hooks": None}, timeout=180
         )
 
     async def _write_message(self, message: dict[str, Any]) -> None:
@@ -1195,12 +1474,12 @@ class ClaudeEndpoint:
             paths = "\n".join(f"- {path}" for path in shared)
             prompt = (
                 f"{prompt}\n\n"
-                "[Shared cockpit image]\n"
+                "[Shared cockpit files]\n"
                 "Before answering, use the Read tool on every exact local path "
-                "below. George explicitly attached these images for this turn. "
+                "below. George explicitly attached these files for this turn. "
                 "Do not claim to have inspected them unless Read succeeds.\n"
                 f"{paths}\n"
-                "[End shared cockpit image]"
+                "[End shared cockpit files]"
             )
         message = {
             "type": "user",
@@ -1216,6 +1495,29 @@ class ClaudeEndpoint:
             if self.active is turn:
                 self.active = None
 
+    async def steer(self, text: str) -> bool:
+        if self.active is None:
+            return False
+        # Claude's streaming JSON input accepts another user message while the
+        # current request is running and treats it as live guidance.
+        await self._write_message(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}],
+                },
+            }
+        )
+        return True
+
+    async def reset(self) -> str:
+        """Preserve the old session and open a fresh persistent trajectory."""
+        await self.close()
+        self.session_id = None
+        await self._spawn()
+        return ""
+
     async def interrupt(self) -> None:
         turn = self.active
         if turn is None:
@@ -1230,8 +1532,12 @@ class ClaudeEndpoint:
             turn.done.set_result(TurnResult("claude", text, "interrupted"))
         process = self.process
         if process and process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGINT)
+            if os.name == "nt":
+                with contextlib.suppress(ProcessLookupError, OSError, ValueError):
+                    process.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)
             try:
                 await asyncio.wait_for(process.wait(), timeout=3)
             except asyncio.TimeoutError:
@@ -1252,6 +1558,10 @@ class ClaudeEndpoint:
         if process and process.returncode is None:
             if process.stdin:
                 process.stdin.close()
+                with contextlib.suppress(
+                    AttributeError, BrokenPipeError, ConnectionResetError
+                ):
+                    await process.stdin.wait_closed()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except asyncio.TimeoutError:
@@ -1261,10 +1571,12 @@ class ClaudeEndpoint:
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-        if self.reader_task and not self.reader_task.done():
-            self.reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+        if self.reader_task:
+            if not self.reader_task.done():
+                self.reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, CockpitError):
                 await self.reader_task
+            self.reader_task = None
         self.process = None
         error = CockpitError("Claude endpoint closed")
         for future in self.pending_controls.values():
@@ -1429,11 +1741,238 @@ class ClaudeEndpoint:
                     )
 
 
+class AntigravityEndpoint:
+    """Optional Google seat using Antigravity CLI, with Gemini CLI fallback."""
+
+    name = "antigravity"
+
+    def __init__(
+        self,
+        cwd: Path,
+        conversation_id: str | None = None,
+        conversation_callback: Callable[[str], None] | None = None,
+        command: Sequence[str] | None = None,
+        instructions: str = DISCUSSION_INSTRUCTIONS,
+    ):
+        self.cwd = cwd
+        self.conversation_id = conversation_id
+        self.conversation_callback = conversation_callback
+        self.instructions = instructions
+        if command:
+            self.command = list(command)
+            self._legacy_gemini = any(
+                Path(part).name.lower().startswith("gemini")
+                for part in self.command
+            )
+        elif shutil.which("agy"):
+            self.command = executable_command("agy")
+            self._legacy_gemini = False
+        elif shutil.which("gemini"):
+            self.command = executable_command("gemini")
+            self._legacy_gemini = True
+        else:
+            self.command = []
+            self._legacy_gemini = False
+        self.process: asyncio.subprocess.Process | None = None
+        self.active = False
+        self.available = bool(self.command)
+        self.authenticated: bool | None = None
+        self.seeded = False
+        self.history_path = (
+            Path.home() / ".gemini" / "antigravity-cli" / "history.jsonl"
+        )
+
+    @property
+    def legacy_gemini(self) -> bool:
+        return self._legacy_gemini
+
+    async def start(self) -> str:
+        if not self.command:
+            raise CockpitError(
+                "Neither Antigravity CLI (`agy`) nor legacy Gemini CLI is installed"
+            )
+        return self.conversation_id or ""
+
+    async def ask(
+        self,
+        prompt: str,
+        emit: DeltaCallback,
+        working: bool = False,
+        attachments: Sequence[Path] = (),
+    ) -> TurnResult:
+        if self.active:
+            raise CockpitError("Antigravity already has an active turn")
+        await self.start()
+        delivered = prompt
+        if not self.seeded:
+            delivered = f"{self.instructions}\n\n{prompt}"
+        command = list(self.command)
+        new_conversation: str | None = None
+        shared_dirs = sorted(
+            {
+                str(path.expanduser().resolve().parent)
+                for path in attachments
+            }
+        )
+        if attachments:
+            paths = "\n".join(
+                f"- {path.expanduser().resolve()}" for path in attachments
+            )
+            delivered += (
+                "\n\n[Shared cockpit files]\nInspect every exact path before "
+                f"answering:\n{paths}\n[End shared cockpit files]"
+            )
+        if self.legacy_gemini:
+            session = self.conversation_id
+            if session:
+                command.extend(("--resume", session))
+            else:
+                session = str(uuid.uuid4())
+                new_conversation = session
+                command.extend(("--session-id", session))
+            for directory in shared_dirs:
+                command.extend(("--include-directories", directory))
+            command.extend(
+                (
+                    "--approval-mode",
+                    "yolo" if working else "plan",
+                    "--output-format",
+                    "text",
+                    "--prompt",
+                    delivered,
+                )
+            )
+        else:
+            if self.conversation_id:
+                command.extend(("--conversation", self.conversation_id))
+            for directory in shared_dirs:
+                command.extend(("--add-dir", directory))
+            if working:
+                command.append("--dangerously-skip-permissions")
+            else:
+                command.append("--sandbox")
+            command.extend(("--print-timeout", "15m", "--print", delivered))
+
+        self.active = True
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=self.cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=CLAUDE_STREAM_LIMIT,
+            )
+            assert self.process.stdout and self.process.stderr
+            pieces: list[str] = []
+            while line := await self.process.stdout.readline():
+                text = line.decode(errors="replace")
+                pieces.append(text)
+                emit(text)
+            stderr = (await self.process.stderr.read()).decode(errors="replace").strip()
+            returncode = await self.process.wait()
+            answer = "".join(pieces).strip()
+            detail = "\n".join(part for part in (stderr, answer) if part)
+            lowered = detail.lower()
+            strong_auth_markers = (
+                "not authenticated",
+                "authentication required",
+                "authentication timed out",
+                "waiting for authentication",
+                "paste the authorization code",
+                "please visit the url to log in",
+            )
+            weak_auth_markers = ("sign in", "signin", "login required")
+            if any(marker in lowered for marker in strong_auth_markers) or (
+                returncode != 0
+                and any(marker in lowered for marker in weak_auth_markers)
+            ):
+                self.authenticated = False
+                raise CockpitError(
+                    "Antigravity needs sign-in. Run `agy` once, complete "
+                    "Google sign-in, then reopen Inception."
+                )
+            if returncode != 0:
+                raise CockpitError(
+                    f"Antigravity failed: {detail or f'exit code {returncode}'}"
+                )
+            if not answer:
+                raise CockpitError("Antigravity returned an empty answer")
+            self.authenticated = True
+            self.seeded = True
+            if self.legacy_gemini and new_conversation:
+                self._remember_conversation(new_conversation)
+            elif not self.legacy_gemini:
+                conversation = self._latest_conversation()
+                if conversation:
+                    self._remember_conversation(conversation)
+            return TurnResult(self.name, answer, "completed")
+        finally:
+            self.active = False
+            self.process = None
+
+    async def steer(self, text: str) -> bool:
+        # Antigravity print mode does not expose same-turn steering. The caller
+        # can interrupt, then continue the preserved conversation with guidance.
+        return False
+
+    async def interrupt(self) -> None:
+        process = self.process
+        if process and process.returncode is None:
+            process.terminate()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=3)
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    async def reset(self) -> str:
+        await self.interrupt()
+        self.conversation_id = None
+        self.seeded = False
+        return ""
+
+    async def close(self) -> None:
+        await self.interrupt()
+
+    def _remember_conversation(self, conversation_id: str) -> None:
+        self.conversation_id = conversation_id
+        if self.conversation_callback:
+            self.conversation_callback(conversation_id)
+
+    def _latest_conversation(self) -> str | None:
+        if not self.history_path.is_file():
+            return None
+        latest: str | None = None
+        try:
+            with self.history_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    conversation = record.get("conversationId")
+                    workspace = str(record.get("workspace") or "")
+                    if isinstance(conversation, str) and (
+                        not workspace
+                        or Path(workspace).expanduser().resolve() == self.cwd
+                    ):
+                        latest = conversation
+        except OSError:
+            return None
+        return latest
+
+
 class LabeledOutput:
-    def __init__(self):
+    def __init__(self, visible: bool = True):
+        self.visible = visible
         self.buffers = {"claude": "", "codex": ""}
 
     def feed(self, agent: str, text: str) -> None:
+        if not self.visible:
+            return
         buffer = self.buffers.get(agent, "") + text.replace("\r", "")
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
@@ -1447,6 +1986,8 @@ class LabeledOutput:
         self.buffers[agent] = buffer
 
     def flush(self, agent: str) -> None:
+        if not self.visible:
+            return
         buffer = self.buffers.get(agent, "")
         if buffer:
             self._print(agent, buffer)
@@ -1460,21 +2001,73 @@ class LabeledOutput:
 class Broker:
     def __init__(
         self,
-        codex: Any,
-        claude: Any,
+        codex: Any | None,
+        claude: Any | None,
         journal: Journal | None = None,
         continuity: ContinuityEngine | None = None,
         attachment_dir: Path = DEFAULT_ATTACHMENT_DIR,
+        antigravity: Any | None = None,
+        relationship: RelationshipLedger | None = None,
+        surfaces: SurfaceHub | None = None,
+        arena: ArenaManager | None = None,
+        endpoint_factory: Callable[[str, Path], Any] | None = None,
+        state: dict[str, Any] | None = None,
+        state_store: StateStore | None = None,
     ):
-        self.endpoints = {"codex": codex, "claude": claude}
+        self.endpoints: dict[str, Any] = {}
+        for name, endpoint in (
+            ("codex", codex),
+            ("claude", claude),
+            ("antigravity", antigravity),
+        ):
+            if endpoint is not None:
+                self.endpoints[name] = endpoint
+        if len(self.endpoints) < 2:
+            raise CockpitError("The cockpit needs at least two available model endpoints")
         self.journal = journal
         self.continuity = continuity
+        self.relationship = relationship
+        self.surfaces = surfaces
+        self.arena = arena
+        self.endpoint_factory = endpoint_factory
+        self.state = state
+        self.state_store = state_store
         self.attachment_dir = attachment_dir
-        self.cwd = Path(getattr(codex, "cwd", Path.cwd())).expanduser().resolve()
+        first = next(iter(self.endpoints.values()))
+        self.cwd = Path(getattr(first, "cwd", Path.cwd())).expanduser().resolve()
         self.last_packet = ContinuityPacket()
         self.last: dict[str, str] = {}
+        self.last_agents: list[str] = []
         self.active_agents: set[str] = set()
+        self.active_modes: dict[str, str] = {}
+        self.pending_guidance: dict[str, tuple[str, str]] = {}
         self.dialogue_stop_requested = False
+        self.guard_enabled = True
+        self.last_arena_id: str | None = None
+        self.arena_endpoints: dict[str, Any] = {}
+
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(
+            name for name in PROVIDER_NAMES if name in self.endpoints
+        )
+
+    def default_pair(self) -> tuple[str, str]:
+        if "claude" in self.endpoints and "codex" in self.endpoints:
+            return ("claude", "codex")
+        names = self.provider_names
+        if len(names) < 2:
+            raise CockpitError("Two connected providers are required")
+        return names[0], names[1]
+
+    def agents_for(self, target: str) -> list[str]:
+        if target in self.endpoints:
+            return [target]
+        if target == "all":
+            return list(self.provider_names)
+        if target == "both":
+            return list(self.default_pair())
+        raise CockpitError(f"Unknown target: {target}")
 
     async def ask(
         self,
@@ -1482,18 +2075,29 @@ class Broker:
         prompt: str,
         mode: str | None = None,
         attachments: Sequence[Path] = (),
+        *,
+        selected_agents: Sequence[str] | None = None,
+        visible: bool = True,
+        learn: bool = True,
+        remember: bool = True,
+        record: bool = True,
     ) -> dict[str, TurnResult]:
         if self.active_agents:
             raise CockpitError("A cockpit turn is already running")
-        agents = ["claude", "codex"] if target == "both" else [target]
+        agents = list(selected_agents or self.agents_for(target))
+        agents = list(dict.fromkeys(agents))
+        if not agents:
+            raise CockpitError("No model endpoint was selected")
         if any(agent not in self.endpoints for agent in agents):
             raise CockpitError(f"Unknown target: {target}")
         if mode is None:
-            mode = "discussion" if target == "both" else "work"
+            mode = "discussion" if len(agents) > 1 else "work"
         if mode not in TURN_MODES:
             raise CockpitError(f"Unknown cockpit mode: {mode}")
-        if target == "both" and mode != "discussion":
-            raise CockpitError("Select Claude or Codex for working actions; /both is read-only")
+        if len(agents) > 1 and mode != "discussion":
+            raise CockpitError(
+                "/both is read-only; select one model for a shared working checkout"
+            )
         working = mode in {"work", "action"}
         turn_id = str(uuid.uuid4())
         packet = (
@@ -1501,6 +2105,21 @@ class Broker:
             if self.continuity is not None
             else ContinuityPacket()
         )
+        if self.relationship is not None:
+            relationship_evidence = self.relationship.packet_for(prompt)
+            if relationship_evidence:
+                joined = "\n\n".join(
+                    section
+                    for section in (
+                        packet.evidence,
+                        "[Learned relationship and outcome evidence]\n"
+                        f"{relationship_evidence}",
+                    )
+                    if section
+                )
+                packet = ContinuityPacket(joined, packet.episode_ids)
+            if learn:
+                self.relationship.observe_operator(prompt, self.last_agents)
         self.last_packet = packet
         delivered_prompt = mode_prompt(packet.wrap(prompt), mode)
         if self.continuity is not None:
@@ -1515,9 +2134,10 @@ class Broker:
                     else "no relevant prior exchange"
                 )
                 print(f"[CONTINUITY] Relationship lineage active; {detail} injected.")
-        output = LabeledOutput()
+        output = LabeledOutput(visible=visible)
         self.active_agents = set(agents)
-        if self.journal:
+        self.active_modes = {agent: mode for agent in agents}
+        if self.journal and record:
             self.journal.append(
                 {
                     "type": "prompt",
@@ -1544,6 +2164,7 @@ class Broker:
             finally:
                 output.flush(agent)
                 self.active_agents.discard(agent)
+                self.active_modes.pop(agent, None)
 
         pairs = await asyncio.gather(*(run(agent) for agent in agents))
         results: dict[str, TurnResult] = {}
@@ -1553,9 +2174,16 @@ class Broker:
                 errors.append(f"{agent}: {value}")
                 continue
             results[agent] = value
-            if value.text:
+            if value.text and remember:
                 self.last[agent] = value.text
-            if self.journal:
+            if value.text and learn and self.relationship is not None:
+                self.relationship.observe_answer(
+                    agent,
+                    value.text,
+                    turn_id=turn_id,
+                    category=self._category(prompt),
+                )
+            if self.journal and record:
                 self.journal.append(
                     {
                         "type": "answer",
@@ -1567,7 +2195,26 @@ class Broker:
                 )
         if errors:
             raise CockpitError("; ".join(errors))
+        if remember:
+            self.last_agents = [
+                agent for agent in agents if agent in results and results[agent].text
+            ]
         return results
+
+    @staticmethod
+    def _category(prompt: str) -> str:
+        lowered = prompt.lower()
+        categories = (
+            ("testing", ("test", "failing", "verify", "proof", "ci")),
+            ("debugging", ("bug", "crash", "error", "repair", "broken")),
+            ("design", ("design", "ui", "ux", "layout", "visual")),
+            ("shipping", ("deploy", "release", "publish", "commit", "push")),
+            ("strategy", ("business", "strategy", "price", "market", "customer")),
+        )
+        for category, markers in categories:
+            if any(marker in lowered for marker in markers):
+                return category
+        return "general"
 
     async def pass_answer(
         self, source: str, target: str, note: str = ""
@@ -1577,7 +2224,8 @@ class Broker:
             or source not in self.endpoints
             or target not in self.endpoints
         ):
-            raise CockpitError("Use two different agents: claude codex or codex claude")
+            available = ", ".join(self.provider_names)
+            raise CockpitError(f"Use two different connected models: {available}")
         answer = self.last.get(source)
         if not answer:
             raise CockpitError(f"There is no completed {source} answer to forward")
@@ -1594,21 +2242,35 @@ class Broker:
         topic: str,
         reply_turns: int = 2,
         attachments: Sequence[Path] = (),
+        participants: Sequence[str] | None = None,
     ) -> dict[str, TurnResult]:
         if not 1 <= reply_turns <= 6:
             raise CockpitError("A dialogue needs between 1 and 6 replies")
+        pair = tuple(participants or self.default_pair())
+        if len(pair) != 2 or len(set(pair)) != 2:
+            raise CockpitError("A dialogue needs two different model names")
+        if any(agent not in self.endpoints for agent in pair):
+            raise CockpitError(
+                f"Connected models are: {', '.join(self.provider_names)}"
+            )
         self.dialogue_stop_requested = False
-        print("[TALK] Opening: Claude and Codex answer George independently.")
+        first, second = pair
+        print(
+            f"[TALK] Opening: {first.title()} and {second.title()} "
+            "answer George independently."
+        )
         opening = await self.ask(
             "both",
             (
-                "George is opening a visible Claude-Codex dialogue. Give your own "
+                f"George is opening a visible {first.title()}-{second.title()} "
+                "dialogue. Give your own "
                 "initial answer to the topic. Do not pretend you have seen the "
                 "other agent's answer yet.\n\n"
                 f"Topic: {topic}"
             ),
             mode="discussion",
             attachments=attachments,
+            selected_agents=pair,
         )
         latest = dict(opening)
         if self.dialogue_stop_requested or any(
@@ -1616,7 +2278,7 @@ class Broker:
         ):
             return latest
 
-        source, target = "claude", "codex"
+        source, target = first, second
         for reply_number in range(1, reply_turns + 1):
             if self.dialogue_stop_requested:
                 break
@@ -1641,6 +2303,414 @@ class Broker:
             source, target = target, source
         print("[TALK] The granted dialogue is finished. Control returns to George.")
         return latest
+
+    async def council(
+        self,
+        topic: str,
+        rounds: int = 1,
+        attachments: Sequence[Path] = (),
+    ) -> dict[str, TurnResult]:
+        names = self.provider_names
+        if len(names) < 3:
+            raise CockpitError("A council needs Claude, Codex, and Antigravity")
+        if not 1 <= rounds <= 3:
+            raise CockpitError("Council rounds must be between 1 and 3")
+        self.dialogue_stop_requested = False
+        print("[COUNCIL] All three models are answering independently.")
+        latest = await self.ask(
+            "all",
+            (
+                "George is opening a visible three-model council. Give an "
+                "independent opening answer. Do not pretend to have seen the "
+                f"others yet.\n\nTopic: {topic}"
+            ),
+            mode="discussion",
+            attachments=attachments,
+            selected_agents=names,
+        )
+        for round_number in range(1, rounds + 1):
+            if self.dialogue_stop_requested:
+                break
+            transcript = "\n\n".join(
+                f"--- {agent.title()} ---\n{result.text}"
+                for agent, result in latest.items()
+            )
+            print(f"[COUNCIL] Challenge round {round_number}/{rounds}.")
+            latest = await self.ask(
+                "all",
+                (
+                    "George granted another council round. Read every completed "
+                    "answer below. Challenge the strongest weak point, acknowledge "
+                    "what survives, and improve the joint decision. Address the "
+                    "other models directly. Do not split the difference merely to "
+                    f"be polite.\n\nOriginal topic: {topic}\n\n{transcript}"
+                ),
+                mode="discussion",
+                attachments=attachments,
+                selected_agents=names,
+            )
+        print("[COUNCIL] The granted council is finished. Control returns to George.")
+        return latest
+
+    async def guarded_ask(
+        self, target: str, prompt: str, mode: str = "work"
+    ) -> dict[str, TurnResult]:
+        if target not in self.endpoints:
+            raise CockpitError(f"Unknown model: {target}")
+        critics = [name for name in self.provider_names if name != target]
+        if not critics:
+            return await self.ask(target, prompt, mode=mode)
+        critic_names = " and ".join(name.title() for name in critics)
+        print(
+            f"[CHECKER] {target.title()} is drafting. "
+            f"{critic_names} will challenge it before delivery."
+        )
+        draft_results = await self.ask(
+            target,
+            (
+                "Prepare the answer or execution plan for George, but do not act "
+                "yet and do not address George as if this draft were final. State "
+                "the evidence you would use and any claim that still needs proof.\n\n"
+                f"George's request: {prompt}"
+            ),
+            mode="discussion",
+            visible=False,
+            learn=False,
+            remember=False,
+            record=False,
+        )
+        draft = draft_results[target].text
+        mechanical = deterministic_objections(prompt, draft)
+        checker_prompt = (
+            "You are an independent pre-delivery objection checker. Predict "
+            "what George will reject in the draft: repeated corrected mistakes, "
+            "weak proof, flattery, unauthorized expansion, fake completion, or "
+            "motion without progress. Be specific. If it is sound, say PASS and "
+            "name the proof that makes it sound.\n\n"
+            f"George's request:\n{prompt}\n\n"
+            f"Draft from {target.title()}:\n{draft}\n\n"
+            f"Mechanical warnings:\n"
+            f"{chr(10).join('- ' + item for item in mechanical) or '- none'}"
+        )
+        try:
+            critic_results = await self.ask(
+                "all",
+                checker_prompt,
+                mode="discussion",
+                selected_agents=critics,
+                visible=False,
+                learn=False,
+                remember=False,
+                record=False,
+            )
+            critique_sections = [
+                f"{critic.title()}'s critique:\n{critic_results[critic].text}"
+                for critic in critics
+                if critic in critic_results
+            ]
+            checker_result = f"{critic_names} completed the challenge"
+        except CockpitError as exc:
+            critique_sections = [
+                "Independent model check failed; use the mechanical warnings "
+                f"and verify every claim directly. Checker error: {exc}"
+            ]
+            checker_result = "The independent model check failed safely"
+        critique = "\n\n".join(critique_sections)
+        print(
+            f"[CHECKER] {checker_result}; "
+            f"{len(mechanical)} mechanical warning(s). "
+            f"{target.title()} is now producing the checked result."
+        )
+        return await self.ask(
+            target,
+            (
+                "Deliver George's final result now. Use the draft and independent "
+                "critique below, but reject any bad criticism. For a WORK or ACTION "
+                "turn, perform the requested work now and verify it before claiming "
+                "completion. Keep the final answer direct.\n\n"
+                f"George's request:\n{prompt}\n\n"
+                f"Your draft:\n{draft}\n\n"
+                f"{critique}\n\n"
+                f"Mechanical warnings:\n"
+                f"{chr(10).join('- ' + item for item in mechanical) or '- none'}"
+            ),
+            mode=mode,
+        )
+
+    async def steer(self, target: str | None, text: str) -> dict[str, bool]:
+        agents = (
+            [target]
+            if target
+            else [agent for agent in self.provider_names if agent in self.active_agents]
+        )
+        if not agents:
+            raise CockpitError("No active model can receive guidance")
+        results: dict[str, bool] = {}
+        for agent in agents:
+            endpoint = self.endpoints.get(agent)
+            if endpoint is None or agent not in self.active_agents:
+                results[agent] = False
+                continue
+            steer = getattr(endpoint, "steer", None)
+            results[agent] = bool(await steer(text)) if steer else False
+            if not results[agent] and agent == "antigravity":
+                self.pending_guidance[agent] = (
+                    text,
+                    self.active_modes.get(agent, "work"),
+                )
+                await endpoint.interrupt()
+        if self.journal:
+            self.journal.append(
+                {
+                    "type": "steer",
+                    "targets": agents,
+                    "text": text,
+                    "accepted": results,
+                }
+            )
+        return results
+
+    async def continue_pending_guidance(self) -> dict[str, TurnResult]:
+        if not self.pending_guidance:
+            return {}
+        agent, (guidance, mode) = self.pending_guidance.popitem()
+        return await self.ask(
+            agent,
+            (
+                "Your previous Antigravity turn was stopped because its CLI lacks "
+                "same-turn steering. Continue the preserved conversation now and "
+                f"obey George's new guidance:\n\n{guidance}"
+            ),
+            mode=mode,
+        )
+
+    async def recover(self, agent: str, reason: str) -> dict[str, TurnResult]:
+        if agent not in self.endpoints:
+            raise CockpitError(f"Unknown model: {agent}")
+        endpoint = self.endpoints[agent]
+        old_session = (
+            getattr(endpoint, "thread_id", None)
+            or getattr(endpoint, "session_id", None)
+            or getattr(endpoint, "conversation_id", None)
+        )
+        if self.relationship:
+            trajectory = self.relationship.snapshot_trajectory(
+                agent, reason, old_session
+            )
+        else:
+            trajectory = "unrecorded"
+        reset = getattr(endpoint, "reset", None)
+        if reset is None:
+            raise CockpitError(f"{agent.title()} cannot reset its trajectory")
+        new_session = await reset()
+        if self.state is not None and self.state_store is not None:
+            key = {
+                "codex": "codex_thread_id",
+                "claude": "claude_session_id",
+                "antigravity": "antigravity_conversation_id",
+            }[agent]
+            if new_session:
+                self.state[key] = new_session
+            else:
+                self.state.pop(key, None)
+            self.state_store.save()
+        print(
+            f"[RECOVERY] Preserved {agent.title()}'s old trajectory as "
+            f"{trajectory}; a fresh session is connected."
+        )
+        return {
+            agent: TurnResult(
+                agent,
+                f"Fresh trajectory started after: {reason}",
+                "completed",
+            )
+        }
+
+    async def run_arena(
+        self,
+        prompt: str,
+        test_command: str | None = None,
+        participants: Sequence[str] | None = None,
+    ) -> dict[str, TurnResult]:
+        if self.arena is None or self.endpoint_factory is None:
+            raise CockpitError("The isolated build arena is unavailable")
+        if self.active_agents:
+            raise CockpitError("A cockpit turn is already running")
+        pair = tuple(participants or self.default_pair())
+        if len(pair) != 2 or len(set(pair)) != 2:
+            raise CockpitError("An arena needs two different model names")
+        if any(agent not in self.endpoints for agent in pair):
+            raise CockpitError(
+                f"Connected models are: {', '.join(self.provider_names)}"
+            )
+        try:
+            run = await asyncio.to_thread(
+                self.arena.prepare,
+                prompt,
+                test_command,
+                pair,
+            )
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        self.last_arena_id = run.id
+        print(
+            f"[ARENA] {run.id}: isolated copies are ready for "
+            f"{pair[0].title()} and {pair[1].title()}."
+        )
+        output = LabeledOutput()
+        self.active_agents = set(pair)
+        results: dict[str, TurnResult] = {}
+        errors: list[str] = []
+
+        async def attempt(agent: str) -> tuple[str, TurnResult | Exception]:
+            worktree = Path(run.attempts[agent].worktree)
+            endpoint = self.endpoint_factory(agent, worktree)
+            self.arena_endpoints[agent] = endpoint
+            try:
+                await endpoint.start()
+                result = await endpoint.ask(
+                    mode_prompt(
+                        (
+                            "You are in an isolated Inception arena copy. Implement "
+                            "George's request completely in this copy. Do not push or "
+                            "contact external systems. Inspect, edit, and test. Leave "
+                            "all useful changes in the worktree; the arena will "
+                            "preserve them mechanically.\n\n"
+                            f"George's request: {prompt}"
+                        ),
+                        "action",
+                    ),
+                    lambda text: output.feed(agent, text),
+                    working=True,
+                )
+                return agent, result
+            except Exception as exc:
+                return agent, exc
+            finally:
+                output.flush(agent)
+                await endpoint.close()
+                self.arena_endpoints.pop(agent, None)
+                self.active_agents.discard(agent)
+
+        pairs = await asyncio.gather(*(attempt(agent) for agent in pair))
+        for agent, value in pairs:
+            if isinstance(value, Exception):
+                errors.append(f"{agent}: {value}")
+                value = TurnResult(agent, "", "failed")
+            results[agent] = value
+            try:
+                await asyncio.to_thread(
+                    self.arena.finalize_attempt,
+                    run,
+                    agent,
+                    value.text,
+                    value.status,
+                )
+            except OperatingRoomError as exc:
+                errors.append(f"{agent} preservation: {exc}")
+
+        print("[ARENA] Running the same mechanical proof in both isolated copies.")
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(self.arena.run_tests, run, agent)
+                for agent in pair
+            )
+        )
+        packet = self.arena.comparison_packet(run)
+        reviews: dict[str, str] = {}
+        votes: dict[str, str] = {}
+        for reviewer in pair:
+            reviewed = await self.ask(
+                reviewer,
+                (
+                    "Independently judge two isolated implementations. Mechanical "
+                    "test results outrank rhetoric. Check whether the change really "
+                    "answers George, introduces regressions, or merely looks busy. "
+                    f"End with exactly WINNER: {pair[0]}, WINNER: {pair[1]}, or "
+                    "WINNER: tie.\n\n"
+                    f"{packet}"
+                ),
+                mode="discussion",
+                visible=False,
+                learn=False,
+                remember=False,
+            )
+            review = reviewed[reviewer].text
+            reviews[reviewer] = review
+            match = re.search(
+                rf"WINNER:\s*({re.escape(pair[0])}|{re.escape(pair[1])}|tie)\b",
+                review,
+                re.IGNORECASE,
+            )
+            votes[reviewer] = match.group(1).lower() if match else "tie"
+        run.reviews = reviews
+        recommendation = self.arena.recommend(run, votes)
+        for agent in pair:
+            attempt_value = run.attempts[agent]
+            proof = (
+                "PASS"
+                if attempt_value.test and attempt_value.test.passed
+                else "FAIL"
+            )
+            print(
+                f"[ARENA] {agent.title()}: {proof}; "
+                f"{len(attempt_value.changed_files)} changed file(s)."
+            )
+        print(
+            f"[ARENA] Recommendation: {recommendation}. "
+            f"George chooses with /choose {run.id} MODEL."
+        )
+        if self.journal:
+            self.journal.append(
+                {
+                    "type": "arena",
+                    "run_id": run.id,
+                    "participants": list(pair),
+                    "prompt": prompt,
+                    "test_command": run.test_command,
+                    "recommendation": recommendation,
+                    "errors": errors,
+                }
+            )
+        if errors:
+            print(f"[ARENA] Problems preserved in replay: {'; '.join(errors)}")
+        return results
+
+    async def choose_arena(self, run_id: str, agent: str) -> dict[str, TurnResult]:
+        if self.arena is None:
+            raise CockpitError("The isolated build arena is unavailable")
+        try:
+            commit = await asyncio.to_thread(self.arena.choose, run_id, agent)
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        if self.relationship:
+            self.relationship.record_outcome(
+                agent,
+                "arena",
+                "success",
+                f"George selected {agent}'s isolated build; applied as {commit}.",
+                run_id=run_id,
+            )
+        print(f"[ARENA] Applied {agent.title()}'s winner as commit {commit}.")
+        return {agent: TurnResult(agent, commit, "completed")}
+
+    async def undo_arena(self, run_id: str) -> dict[str, TurnResult]:
+        if self.arena is None:
+            raise CockpitError("The isolated build arena is unavailable")
+        try:
+            commit = await asyncio.to_thread(self.arena.undo, run_id)
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        print(f"[ARENA] Undid arena {run_id} with recoverable revert {commit}.")
+        return {"system": TurnResult("system", commit, "completed")}
+
+    def replay_arena(self, run_id: str) -> str:
+        if self.arena is None:
+            raise CockpitError("The isolated build arena is unavailable")
+        try:
+            return self.arena.replay_text(run_id)
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
 
     async def look(
         self,
@@ -1674,10 +2744,105 @@ class Broker:
             attachments=(image,),
         )
 
+    async def share_file(
+        self, value: str, prompt: str, reply_turns: int = 0
+    ) -> dict[str, TurnResult]:
+        if self.surfaces is None:
+            raise CockpitError("Shared-file adapters are unavailable")
+        try:
+            artifact = await asyncio.to_thread(
+                self.surfaces.stage_file, value, self.cwd
+            )
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        detail = json.dumps(artifact.metadata, ensure_ascii=False)
+        request = (
+            f"{prompt}\n\nGeorge shared one {artifact.kind}. "
+            f"Metadata: {detail}"
+        )
+        print(f"[SHARE] Private copy staged as {artifact.path.name}.")
+        if reply_turns:
+            return await self.talk(
+                request,
+                reply_turns=reply_turns,
+                attachments=(artifact.path,),
+            )
+        return await self.ask(
+            "both",
+            request,
+            mode="discussion",
+            attachments=(artifact.path,),
+        )
+
+    async def capture_surface(
+        self,
+        kind: str,
+        prompt: str,
+        reply_turns: int = 2,
+        page_target: str = "",
+    ) -> dict[str, TurnResult]:
+        if self.surfaces is None:
+            raise CockpitError("Live surface adapters are unavailable")
+        try:
+            if kind == "screen":
+                artifact = await asyncio.to_thread(self.surfaces.capture_screen)
+            elif kind == "browser":
+                artifact = await asyncio.to_thread(
+                    self.surfaces.capture_browser, page_target
+                )
+            else:
+                raise CockpitError(f"Unknown live surface: {kind}")
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        metadata = json.dumps(artifact.metadata, ensure_ascii=False)
+        print(
+            f"[{kind.upper()}] Captured live view as {artifact.path.name}; "
+            "both models receive the same pixels."
+        )
+        return await self.talk(
+            f"{prompt}\n\nLive {kind} metadata: {metadata}",
+            reply_turns=reply_turns,
+            attachments=(artifact.path,),
+        )
+
+    async def point_live_browser(
+        self,
+        target: str,
+        prompt: str,
+        reply_turns: int = 2,
+        page_target: str = "",
+    ) -> dict[str, TurnResult]:
+        if self.surfaces is None:
+            raise CockpitError("Browser pointing is unavailable")
+        try:
+            artifact = await asyncio.to_thread(
+                self.surfaces.point_browser, target, page_target
+            )
+        except OperatingRoomError as exc:
+            raise CockpitError(str(exc)) from exc
+        metadata = json.dumps(artifact.metadata, ensure_ascii=False)
+        print(
+            f"[BROWSER POINT] Marked {target!r}; both models receive the "
+            "same screenshot and DOM evidence."
+        )
+        return await self.talk(
+            f"{prompt}\n\nGeorge pointed to browser target {target!r}. "
+            f"Element evidence: {metadata}",
+            reply_turns=reply_turns,
+            attachments=(artifact.path,),
+        )
+
     async def stop(self) -> None:
         self.dialogue_stop_requested = True
         await asyncio.gather(
-            *(self.endpoints[agent].interrupt() for agent in tuple(self.active_agents)),
+            *(
+                (
+                    self.arena_endpoints.get(agent)
+                    or self.endpoints.get(agent)
+                ).interrupt()
+                for agent in tuple(self.active_agents)
+                if self.arena_endpoints.get(agent) or self.endpoints.get(agent)
+            ),
             return_exceptions=True,
         )
 
@@ -1691,12 +2856,44 @@ class OperatorCommand:
     replies: int = 0
     image: str | None = None
     point: tuple[int, int] | None = None
+    participants: tuple[str, ...] = ()
+    test_command: str | None = None
+    category: str = ""
+    verdict: str = ""
+    run_id: str | None = None
+
+
+PROVIDER_ALIASES = {
+    "claude": "claude",
+    "codex": "codex",
+    "antigravity": "antigravity",
+    "agy": "antigravity",
+    "gemini": "antigravity",
+    "google": "antigravity",
+}
+
+
+def provider_name(value: str) -> str | None:
+    return PROVIDER_ALIASES.get(value.lower().strip())
 
 
 def talk_command(text: str) -> OperatorCommand:
     rest = text.strip()
     if not rest:
         raise CockpitError("Use /talk TEXT or /talk REPLIES TEXT")
+    participants: tuple[str, ...] = ()
+    first = rest.split(maxsplit=2)
+    if (
+        len(first) == 3
+        and provider_name(first[0])
+        and provider_name(first[1])
+    ):
+        left = provider_name(first[0])
+        right = provider_name(first[1])
+        if left == right:
+            raise CockpitError("/talk needs two different models")
+        participants = (left or "", right or "")
+        rest = first[2].strip()
     replies = 2
     parts = rest.split(maxsplit=1)
     if parts[0].isdigit():
@@ -1706,7 +2903,9 @@ def talk_command(text: str) -> OperatorCommand:
         rest = parts[1].strip()
     if not 1 <= replies <= 6:
         raise CockpitError("/talk replies must be between 1 and 6")
-    return OperatorCommand("talk", text=rest, replies=replies)
+    return OperatorCommand(
+        "talk", text=rest, replies=replies, participants=participants
+    )
 
 
 def image_command(kind: str, text: str) -> OperatorCommand:
@@ -1733,16 +2932,59 @@ def image_command(kind: str, text: str) -> OperatorCommand:
     )
 
 
+def arena_command(text: str) -> OperatorCommand:
+    raw = text.strip()
+    if not raw:
+        raise CockpitError("Use /arena REQUEST")
+    participants: tuple[str, ...] = ()
+    test_command: str | None = None
+    if "::" not in raw:
+        return OperatorCommand("arena", text=raw)
+    options, request = (part.strip() for part in raw.split("::", 1))
+    if not request:
+        raise CockpitError("The arena needs a request after ::")
+    try:
+        tokens = shlex.split(options)
+    except ValueError as exc:
+        raise CockpitError(f"Cannot parse /arena options: {exc}") from exc
+    index = 0
+    if len(tokens) >= 2 and provider_name(tokens[0]) and provider_name(tokens[1]):
+        left = provider_name(tokens[0])
+        right = provider_name(tokens[1])
+        if left == right:
+            raise CockpitError("The arena needs two different models")
+        participants = (left or "", right or "")
+        index = 2
+    while index < len(tokens):
+        if tokens[index] == "--test" and index + 1 < len(tokens):
+            test_command = tokens[index + 1]
+            index += 2
+            continue
+        raise CockpitError(
+            "Use /arena [MODEL MODEL] [--test \"COMMAND\"] :: REQUEST"
+        )
+    return OperatorCommand(
+        "arena",
+        text=request,
+        participants=participants,
+        test_command=test_command,
+    )
+
+
 def parse_operator_command(line: str) -> OperatorCommand:
     raw = line.strip()
     if not raw:
         return OperatorCommand("empty")
     natural_action = re.match(
-        r"^(claude|codex)\s*!:\s*(.+)$", raw, re.IGNORECASE | re.DOTALL
+        r"^(claude|codex|antigravity|agy|gemini|google)\s*!:\s*(.+)$",
+        raw,
+        re.IGNORECASE | re.DOTALL,
     )
     if natural_action:
         return OperatorCommand(
-            "act", natural_action.group(1).lower(), natural_action.group(2).strip()
+            "act",
+            provider_name(natural_action.group(1)),
+            natural_action.group(2).strip(),
         )
     natural_talk = re.match(
         r"^talk(?:\s+(\d+))?\s*:\s*(.+)$", raw, re.IGNORECASE | re.DOTALL
@@ -1753,47 +2995,120 @@ def parse_operator_command(line: str) -> OperatorCommand:
         )
         return talk_command(f"{prefix}{natural_talk.group(2)}")
     natural = re.match(
-        r"^(both|claude|codex)\s*:\s*(.+)$", raw, re.IGNORECASE | re.DOTALL
+        r"^(both|all|claude|codex|antigravity|agy|gemini|google)\s*:\s*(.+)$",
+        raw,
+        re.IGNORECASE | re.DOTALL,
     )
     if natural:
+        target = natural.group(1).lower()
+        target = provider_name(target) or target
         return OperatorCommand(
-            "ask", natural.group(1).lower(), natural.group(2).strip()
+            "ask", target, natural.group(2).strip()
         )
     if not raw.startswith("/"):
         raise CockpitError(
-            "Start with /talk, /look, /point, /both, /claude, or /codex "
+            "Start with /talk, /both, /all, /claude, /codex, or /antigravity "
             "(or use 'talk: ...')"
         )
     name, _, rest = raw[1:].partition(" ")
     name = name.lower()
     rest = rest.strip()
-    if name in {"both", "claude", "codex"}:
+    normalized_name = provider_name(name)
+    if name in {"both", "all"} or normalized_name:
         if not rest:
             raise CockpitError(f"/{name} needs a message")
-        return OperatorCommand("ask", name, rest)
+        return OperatorCommand("ask", normalized_name or name, rest)
     if name == "talk":
         return talk_command(rest)
+    if name == "council":
+        if not rest:
+            raise CockpitError("Use /council [ROUNDS] TOPIC")
+        rounds = 1
+        parts = rest.split(maxsplit=1)
+        if parts[0].isdigit():
+            rounds = int(parts[0])
+            if len(parts) != 2:
+                raise CockpitError("A numbered council also needs a topic")
+            rest = parts[1]
+        if not 1 <= rounds <= 3:
+            raise CockpitError("Council rounds must be between 1 and 3")
+        return OperatorCommand("council", text=rest, replies=rounds)
     if name in {"look", "point"}:
         return image_command(name, rest)
+    if name == "file":
+        command = image_command("look", rest)
+        return OperatorCommand("file", text=command.text, image=command.image)
+    if name in {"screen", "browser"}:
+        if not rest:
+            raise CockpitError(f"/{name} needs a question")
+        if name == "browser" and "::" in rest:
+            page_target, question = (
+                part.strip() for part in rest.split("::", 1)
+            )
+            if not page_target or not question:
+                raise CockpitError("Use /browser TAB :: QUESTION")
+            return OperatorCommand(
+                name, text=question, source=page_target, replies=2
+            )
+        return OperatorCommand(name, text=rest, replies=2)
+    if name in {"browser-point", "bpoint"}:
+        if rest.count("::") >= 2:
+            page_target, target, question = (
+                part.strip() for part in rest.split("::", 2)
+            )
+            if not page_target or not target or not question:
+                raise CockpitError(
+                    "Use /browser-point TAB :: ELEMENT :: QUESTION"
+                )
+            return OperatorCommand(
+                "browser-point",
+                text=question,
+                source=target,
+                image=page_target,
+                replies=2,
+            )
+        try:
+            parts = shlex.split(rest)
+        except ValueError as exc:
+            raise CockpitError(f"Cannot parse /browser-point: {exc}") from exc
+        if len(parts) < 2:
+            raise CockpitError(
+                'Use /browser-point "ELEMENT TEXT OR CSS" QUESTION'
+            )
+        return OperatorCommand(
+            "browser-point",
+            text=" ".join(parts[1:]),
+            source=parts[0],
+            replies=2,
+        )
     if name == "act":
         parts = rest.split(maxsplit=1)
-        if len(parts) != 2 or parts[0].lower() not in {"claude", "codex"}:
-            raise CockpitError("Use /act claude TEXT or /act codex TEXT")
-        return OperatorCommand("act", parts[0].lower(), parts[1])
+        target = provider_name(parts[0]) if parts else None
+        if len(parts) != 2 or not target:
+            raise CockpitError(
+                "Use /act claude TEXT, /act codex TEXT, or /act antigravity TEXT"
+            )
+        return OperatorCommand("act", target, parts[1])
     if name == "pass":
         parts = rest.split(maxsplit=2)
         if len(parts) < 2:
-            raise CockpitError("Use /pass claude codex or /pass codex claude")
+            raise CockpitError("Use /pass SOURCE TARGET [NOTE]")
+        source = provider_name(parts[0])
+        target = provider_name(parts[1])
+        if not source or not target:
+            raise CockpitError("Pass needs two model names")
         return OperatorCommand(
             "pass",
-            target=parts[1].lower(),
-            source=parts[0].lower(),
+            target=target,
+            source=source,
             text=parts[2] if len(parts) == 3 else "",
         )
     if name == "last":
-        target = rest.lower() or None
-        if target not in (None, "claude", "codex"):
-            raise CockpitError("Use /last, /last claude, or /last codex")
+        target = provider_name(rest) if rest else None
+        if rest and not target:
+            raise CockpitError(
+                "Use /last, /last claude, /last codex, or /last antigravity"
+            )
         return OperatorCommand("last", target=target)
     if name == "context":
         setting = rest.lower()
@@ -1802,11 +3117,105 @@ def parse_operator_command(line: str) -> OperatorCommand:
                 "Use /context, /context full, /context on, or /context off"
             )
         return OperatorCommand("context", text=setting)
+    if name == "steer":
+        parts = rest.split(maxsplit=1)
+        target = provider_name(parts[0]) if parts else None
+        if target:
+            if len(parts) != 2:
+                raise CockpitError("Use /steer MODEL GUIDANCE")
+            return OperatorCommand("steer", target=target, text=parts[1])
+        if not rest:
+            raise CockpitError("Use /steer [MODEL] GUIDANCE")
+        return OperatorCommand("steer", text=rest)
+    if name in {"listen", "voice"}:
+        if rest:
+            raise CockpitError("Use /listen, then speak the full cockpit command")
+        return OperatorCommand("listen")
+    if name == "guard":
+        setting = rest.lower() or "status"
+        if setting not in {"on", "off", "status"}:
+            raise CockpitError("Use /guard on, /guard off, or /guard status")
+        return OperatorCommand("guard", text=setting)
+    if name == "memory":
+        return OperatorCommand("memory")
+    if name == "correct":
+        parts = rest.split(maxsplit=1)
+        target = provider_name(parts[0]) if parts else None
+        if len(parts) != 2 or not target:
+            raise CockpitError("Use /correct MODEL CORRECTION")
+        return OperatorCommand("correct", target=target, text=parts[1])
+    if name == "promise":
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 2 or parts[0].lower() not in {"add", "done"}:
+            raise CockpitError(
+                "Use /promise add MODEL TEXT or /promise done ID [NOTE]"
+            )
+        action = parts[0].lower()
+        if action == "add":
+            target = provider_name(parts[1])
+            if not target or len(parts) != 3:
+                raise CockpitError("Use /promise add MODEL TEXT")
+            return OperatorCommand(
+                "promise", source="add", target=target, text=parts[2]
+            )
+        return OperatorCommand(
+            "promise",
+            source="done",
+            run_id=parts[1],
+            text=parts[2] if len(parts) == 3 else "",
+        )
+    if name == "outcome":
+        parts = rest.split(maxsplit=4)
+        target = provider_name(parts[0]) if parts else None
+        if (
+            len(parts) < 3
+            or not target
+            or parts[2].lower() not in {"success", "failure", "mixed"}
+        ):
+            raise CockpitError(
+                "Use /outcome MODEL CATEGORY success|failure|mixed [NOTE]"
+            )
+        return OperatorCommand(
+            "outcome",
+            target=target,
+            category=parts[1],
+            verdict=parts[2].lower(),
+            text=parts[3] if len(parts) == 4 else (
+                f"{parts[3]} {parts[4]}" if len(parts) == 5 else ""
+            ),
+        )
+    if name in {"recover", "off"}:
+        parts = rest.split(maxsplit=1)
+        target = provider_name(parts[0]) if parts else None
+        if not target:
+            raise CockpitError("Use /recover MODEL REASON")
+        return OperatorCommand(
+            "recover",
+            target=target,
+            text=parts[1] if len(parts) == 2 else "George said this agent is off.",
+        )
+    if name == "arena":
+        return arena_command(rest)
+    if name == "choose":
+        parts = rest.split()
+        if len(parts) == 1 and provider_name(parts[0]):
+            return OperatorCommand("choose", target=provider_name(parts[0]))
+        if len(parts) == 2 and provider_name(parts[1]):
+            return OperatorCommand(
+                "choose", target=provider_name(parts[1]), run_id=parts[0]
+            )
+        raise CockpitError("Use /choose [ARENA_ID] MODEL")
+    if name in {"undo", "replay"}:
+        parts = rest.split()
+        if len(parts) > 1:
+            raise CockpitError(f"Use /{name} [ARENA_ID]")
+        return OperatorCommand(name, run_id=parts[0] if parts else None)
     if name in {
         "status",
         "where",
         "projects",
         "sessions",
+        "providers",
         "stop",
         "help",
         "quit",
@@ -1844,6 +3253,10 @@ class InputThread:
 
 
 def endpoint_connected(endpoint: Any) -> bool:
+    if getattr(endpoint, "available", False) and not getattr(
+        endpoint, "persistent_process", False
+    ):
+        return True
     process = getattr(endpoint, "process", None)
     return process is not None and getattr(process, "returncode", None) is None
 
@@ -1853,38 +3266,64 @@ def show_status(broker: Broker, state: dict[str, Any]) -> None:
     print("\nCOCKPIT STATUS")
     print(f"Working on: {cwd.name}")
     print(f"Files available to the agents: {cwd}")
-    for agent in ("claude", "codex"):
+    for agent in broker.provider_names:
         if agent in broker.active_agents:
             status = "WORKING NOW"
+        elif agent == "antigravity" and getattr(
+            broker.endpoints[agent], "authenticated", None
+        ) is False:
+            status = "SIGN-IN REQUIRED — run agy once"
+        elif agent == "antigravity" and getattr(
+            broker.endpoints[agent], "authenticated", None
+        ) is None:
+            status = "AVAILABLE — sign-in checked on first turn"
         elif endpoint_connected(broker.endpoints[agent]):
             status = "CONNECTED — waiting for George"
         else:
             status = "NOT CONNECTED"
         print(f"{agent.title()}: {status}")
-    if all(endpoint_connected(broker.endpoints[agent]) for agent in ("claude", "codex")):
+    all_verified = all(
+        endpoint_connected(broker.endpoints[agent])
+        and not (
+            agent == "antigravity"
+            and getattr(broker.endpoints[agent], "authenticated", None) is not True
+        )
+        for agent in broker.provider_names
+    )
+    if all_verified:
         if broker.active_agents:
             names = " and ".join(
                 agent.title()
-                for agent in ("claude", "codex")
+                for agent in broker.provider_names
                 if agent in broker.active_agents
             )
             print(f"A turn is running now: {names}.")
         else:
-            print("Both agents are connected. Nothing happens until you grant a turn.")
+            if len(broker.provider_names) == 2:
+                print(
+                    "Both agents are connected. Nothing happens until you grant a turn."
+                )
+            else:
+                print(
+                    f"{len(broker.provider_names)} models are connected. "
+                    "Nothing happens until you grant a turn."
+                )
 
 
 def show_projects(home: Path = TERMUX_HOME) -> None:
     projects = discover_projects(home)
-    print("\nPROJECTS ON THIS PHONE")
+    print("\nPROJECTS FOUND")
     for project in projects:
         print(f"- {project.name}")
     print("Switch next time with: inception cockpit PROJECT NAME")
 
 
 def show_sessions(state: dict[str, Any]) -> None:
-    print(f"Codex cockpit thread: {state.get('codex_thread_id') or 'not started'}")
+    print(f"Codex cockpit thread: {state.get('codex_thread_id') or 'not selected'}")
+    print(f"Claude cockpit session: {state.get('claude_session_id') or 'not selected'}")
     print(
-        f"Claude cockpit session: {state.get('claude_session_id') or 'created on first turn'}"
+        "Antigravity conversation: "
+        f"{state.get('antigravity_conversation_id') or 'not selected'}"
     )
     print(f"Working directory: {state.get('cwd')}")
 
@@ -1919,22 +3358,92 @@ def show_context(broker: Broker, full: bool = False) -> None:
         print("\nNo prior cockpit evidence was injected on the last turn.")
 
 
+def show_memory(broker: Broker) -> None:
+    if broker.relationship is None:
+        print("Learned relationship ledger: unavailable")
+        return
+    summary = broker.relationship.summary()
+    print("\nLEARNED RELATIONSHIP STATE")
+    promises = summary["open_promises"]
+    print(f"Open promises: {len(promises)}")
+    for promise in promises[:8]:
+        print(
+            f"- {promise['id']} {promise['agent'].title()}: "
+            f"{compact_text(promise['text'], 180)}"
+        )
+    authority = summary["authority"]
+    print("Earned authority:")
+    if not authority:
+        print("- No scored outcomes yet.")
+    for row in authority[:10]:
+        print(
+            f"- {row['agent'].title()} / {row['category']}: "
+            f"{row['score']:.0%} from {row['evidence']:.0f} outcome(s)"
+        )
+    print("Trajectory:")
+    for agent, drift in summary["drift"].items():
+        if agent in broker.endpoints:
+            print(
+                f"- {agent.title()}: {drift['state']} "
+                f"(drift score {drift['score']}/100)"
+            )
+    corrections = summary["recent_corrections"]
+    print(f"Recent corrections retained: {len(corrections)}")
+
+
+def voice_command(text: str, active: bool = False) -> str:
+    heard = re.sub(r"\s+", " ", text).strip()
+    if not heard:
+        raise CockpitError("Speech recognition returned no words")
+    if heard.startswith("/"):
+        return heard
+    lowered = heard.lower()
+    if lowered in {"stop", "stop now", "interrupt", "be quiet"}:
+        return "/stop"
+    if active:
+        if lowered.startswith("steer "):
+            return f"/steer {heard[6:].strip()}"
+        return f"/steer {heard}"
+    prefixes = {
+        "claude ": "/claude ",
+        "codex ": "/codex ",
+        "antigravity ": "/antigravity ",
+        "agy ": "/antigravity ",
+        "gemini ": "/antigravity ",
+        "both ": "/both ",
+        "all ": "/all ",
+        "talk ": "/talk ",
+        "council ": "/council ",
+        "screen ": "/screen ",
+        "browser ": "/browser ",
+    }
+    for prefix, command in prefixes.items():
+        if lowered.startswith(prefix):
+            return command + heard[len(prefix) :]
+    # Voice-first default: a bare spoken question opens a bounded dialogue.
+    return f"/talk {heard}"
+
+
 async def run_console(broker: Broker, state: dict[str, Any]) -> None:
     print("\nGEORGE COCKPIT IS READY")
     show_status(broker, state)
     print("\nTYPE ONE OF THESE:")
-    print("/both YOUR QUESTION       Claude and Codex both answer")
-    print("/talk YOUR QUESTION       Claude and Codex answer each other visibly")
-    print("/look IMAGE QUESTION      both inspect the same screenshot or image")
-    print("/point IMAGE X Y QUESTION mark one spot, then both discuss it")
-    print("/claude YOUR REQUEST      only Claude works; it may change files when asked")
-    print("/codex YOUR REQUEST       only Codex works; it may change files when asked")
-    print("/status                    show what is connected and which project is open")
-    print("/stop                      interrupt a running answer")
+    print("/talk YOUR QUESTION       two models answer each other visibly")
+    if len(broker.provider_names) >= 3:
+        print("/council YOUR QUESTION    Claude, Codex, and Antigravity challenge each other")
+    print("/arena YOUR REQUEST       two isolated builds, tests, comparison, and a winner")
+    print("/screen YOUR QUESTION     capture the live screen for both models")
+    print("/browser YOUR QUESTION    capture the live browser for both models")
+    print("/listen                    speak the next full cockpit command")
+    print("/help                      show every command")
     if broker.continuity:
         print(
             "Continuity memory: ON — both agents receive the shared working context."
         )
+    print(
+        f"Pre-delivery objection checker: "
+        f"{'ON' if broker.guard_enabled else 'OFF'}."
+    )
     print("\ngeorge> ", end="", flush=True)
 
     loop = asyncio.get_running_loop()
@@ -1963,7 +3472,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 try:
                     results = await active_task
                     statuses = []
-                    for agent in ("claude", "codex"):
+                    for agent in broker.provider_names:
                         result = results.get(agent)
                         if result is None:
                             statuses.append(f"{agent.title()}: idle")
@@ -1976,8 +3485,18 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 except CockpitError as exc:
                     print(f"[PROBLEM] {exc}")
                     show_status(broker, state)
-                running["active"] = False
                 active_task = None
+                if broker.pending_guidance:
+                    print(
+                        "[STEER] Antigravity stopped safely and is continuing "
+                        "with George's guidance now."
+                    )
+                    running["active"] = True
+                    active_task = asyncio.create_task(
+                        broker.continue_pending_guidance()
+                    )
+                    continue
+                running["active"] = False
                 print("george> ", end="", flush=True)
 
             if input_task not in completed:
@@ -2003,6 +3522,30 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 if command.kind == "stop":
                     print("[SYSTEM] Interrupting active turn(s)…")
                     await broker.stop()
+                elif command.kind == "steer":
+                    steered = await broker.steer(command.target, command.text)
+                    for agent, accepted in steered.items():
+                        if accepted:
+                            print(
+                                f"[STEER] {agent.title()} received the guidance "
+                                "inside its active turn."
+                            )
+                        else:
+                            print(
+                                f"[STEER] {agent.title()} cannot steer in place; "
+                                "its turn is stopping and will continue with the guidance."
+                            )
+                elif command.kind == "listen":
+                    if broker.surfaces is None:
+                        print("[SYSTEM] Speech input is unavailable.")
+                    else:
+                        try:
+                            heard = await asyncio.to_thread(broker.surfaces.listen)
+                            spoken = voice_command(heard, active=True)
+                            print(f"[HEARD] {heard}")
+                            inputs.inject(spoken + "\n")
+                        except OperatingRoomError as exc:
+                            print(f"[SYSTEM] {exc}")
                 elif command.kind == "status":
                     show_status(broker, state)
                 elif command.kind == "quit":
@@ -2012,7 +3555,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     return
                 else:
                     print(
-                        "[SYSTEM] A turn is running. Use /stop before granting another."
+                        "[SYSTEM] A turn is running. Use /steer, /listen, or /stop."
                     )
                 continue
             if command.kind == "quit":
@@ -2025,6 +3568,11 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 show_projects()
             elif command.kind == "sessions":
                 show_sessions(state)
+            elif command.kind == "providers":
+                print(
+                    "Connected models: "
+                    + ", ".join(name.title() for name in broker.provider_names)
+                )
             elif command.kind == "context":
                 if not broker.continuity:
                     print("[SYSTEM] Continuity layer is unavailable.")
@@ -2041,53 +3589,151 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     show_context(broker, full=True)
                 else:
                     show_context(broker)
+            elif command.kind == "guard":
+                if command.text == "on":
+                    broker.guard_enabled = True
+                elif command.text == "off":
+                    broker.guard_enabled = False
+                state["guard_enabled"] = broker.guard_enabled
+                if broker.state_store:
+                    broker.state_store.save()
+                print(
+                    "[CHECKER] Pre-delivery objection checking is "
+                    f"{'on' if broker.guard_enabled else 'off'}."
+                )
+            elif command.kind == "memory":
+                show_memory(broker)
+            elif command.kind == "correct":
+                if broker.relationship is None:
+                    print("[SYSTEM] Learned relationship ledger is unavailable.")
+                else:
+                    try:
+                        identifier = broker.relationship.add_correction(
+                            command.target or "", command.text
+                        )
+                        print(f"[MEMORY] Correction saved as {identifier}.")
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
+            elif command.kind == "promise":
+                if broker.relationship is None:
+                    print("[SYSTEM] Learned relationship ledger is unavailable.")
+                else:
+                    try:
+                        if command.source == "add":
+                            identifier = broker.relationship.add_promise(
+                                command.target or "", command.text
+                            )
+                            print(f"[MEMORY] Promise saved as {identifier}.")
+                        else:
+                            broker.relationship.resolve_promise(
+                                command.run_id or "", command.text
+                            )
+                            print(
+                                f"[MEMORY] Promise {command.run_id} marked complete."
+                            )
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
+            elif command.kind == "outcome":
+                if broker.relationship is None:
+                    print("[SYSTEM] Learned relationship ledger is unavailable.")
+                else:
+                    try:
+                        identifier = broker.relationship.record_outcome(
+                            command.target or "",
+                            command.category,
+                            command.verdict,
+                            command.text,
+                        )
+                        print(f"[MEMORY] Outcome saved as {identifier}.")
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
             elif command.kind == "stop":
                 print("[SYSTEM] Both agents are already idle.")
             elif command.kind == "last":
-                agents = [command.target] if command.target else ["claude", "codex"]
+                agents = (
+                    [command.target]
+                    if command.target
+                    else list(broker.provider_names)
+                )
                 for agent in agents:
                     text = broker.last.get(agent or "")
                     print(
                         f"[{(agent or '').upper()}] {text or 'No completed answer yet.'}"
                     )
+            elif command.kind == "listen":
+                if broker.surfaces is None:
+                    print("[SYSTEM] Speech input is unavailable.")
+                else:
+                    try:
+                        heard = await asyncio.to_thread(broker.surfaces.listen)
+                        spoken = voice_command(heard)
+                        print(f"[HEARD] {heard}")
+                        print(f"[VOICE COMMAND] {spoken}")
+                        inputs.inject(spoken + "\n")
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
             elif command.kind == "ask":
                 assert command.target
                 running["active"] = True
-                mode = "discussion" if command.target == "both" else "work"
-                if command.target == "both":
+                mode = (
+                    "discussion"
+                    if command.target in {"both", "all"}
+                    else "work"
+                )
+                if command.target in {"both", "all"}:
                     print(
-                        "[WORKING] Claude and Codex are both answering now. "
-                        "Neither can change files during /both."
+                        "[WORKING] The selected models are answering independently. "
+                        "None can change files during a group comparison."
+                    )
+                    active_task = asyncio.create_task(
+                        broker.ask(command.target, command.text, mode=mode)
                     )
                 else:
-                    other = "Codex" if command.target == "claude" else "Claude"
                     print(
                         f"[WORKING] {command.target.title()} is working now. "
-                        f"{other} is idle. Type /stop to interrupt."
+                        "Type /steer to redirect or /stop to interrupt."
                     )
-                active_task = asyncio.create_task(
-                    broker.ask(command.target, command.text, mode=mode)
-                )
+                    active_task = asyncio.create_task(
+                        (
+                            broker.guarded_ask(command.target, command.text, mode)
+                            if broker.guard_enabled
+                            else broker.ask(command.target, command.text, mode=mode)
+                        )
+                    )
             elif command.kind == "talk":
                 running["active"] = True
+                pair = command.participants or broker.default_pair()
                 print(
-                    "[WORKING] Claude and Codex are entering a visible read-only "
+                    "[WORKING] Two models are entering a visible read-only "
                     f"dialogue with {command.replies} replies. Type /stop to interrupt."
                 )
                 active_task = asyncio.create_task(
-                    broker.talk(command.text, reply_turns=command.replies)
+                    broker.talk(
+                        command.text,
+                        reply_turns=command.replies,
+                        participants=pair,
+                    )
+                )
+            elif command.kind == "council":
+                running["active"] = True
+                print(
+                    "[WORKING] Claude, Codex, and Antigravity are entering "
+                    f"{command.replies} challenge round(s)."
+                )
+                active_task = asyncio.create_task(
+                    broker.council(command.text, rounds=command.replies)
                 )
             elif command.kind in {"look", "point"}:
                 assert command.image
                 running["active"] = True
                 if command.kind == "point":
                     print(
-                        "[WORKING] Marking George's point, then Claude and Codex "
+                        "[WORKING] Marking George's point, then both models "
                         "will discuss the same image. Type /stop to interrupt."
                     )
                 else:
                     print(
-                        "[WORKING] Claude and Codex are inspecting the same image. "
+                        "[WORKING] Both models are inspecting the same image. "
                         "Type /stop to interrupt."
                     )
                 active_task = asyncio.create_task(
@@ -2098,6 +3744,42 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                         reply_turns=command.replies,
                     )
                 )
+            elif command.kind == "file":
+                assert command.image
+                running["active"] = True
+                print("[WORKING] Both models are inspecting the same private file.")
+                active_task = asyncio.create_task(
+                    broker.share_file(command.image, command.text)
+                )
+            elif command.kind in {"screen", "browser"}:
+                running["active"] = True
+                print(
+                    f"[WORKING] Capturing the live {command.kind}, then both "
+                    "models will inspect and discuss it."
+                )
+                active_task = asyncio.create_task(
+                    broker.capture_surface(
+                        command.kind,
+                        command.text,
+                        reply_turns=command.replies,
+                        page_target=command.source or "",
+                    )
+                )
+            elif command.kind == "browser-point":
+                assert command.source
+                running["active"] = True
+                print(
+                    "[WORKING] Finding and marking the live browser element, "
+                    "then both models will discuss it."
+                )
+                active_task = asyncio.create_task(
+                    broker.point_live_browser(
+                        command.source,
+                        command.text,
+                        reply_turns=command.replies,
+                        page_target=command.image or "",
+                    )
+                )
             elif command.kind == "act":
                 assert command.target
                 running["active"] = True
@@ -2106,7 +3788,15 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     "now and may edit, test, commit, and push. Type /stop to interrupt."
                 )
                 active_task = asyncio.create_task(
-                    broker.ask(command.target, command.text, mode="action")
+                    (
+                        broker.guarded_ask(
+                            command.target, command.text, mode="action"
+                        )
+                        if broker.guard_enabled
+                        else broker.ask(
+                            command.target, command.text, mode="action"
+                        )
+                    )
                 )
             elif command.kind == "pass":
                 assert command.source and command.target
@@ -2118,6 +3808,52 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 active_task = asyncio.create_task(
                     broker.pass_answer(command.source, command.target, command.text)
                 )
+            elif command.kind == "recover":
+                assert command.target
+                running["active"] = True
+                active_task = asyncio.create_task(
+                    broker.recover(command.target, command.text)
+                )
+            elif command.kind == "arena":
+                running["active"] = True
+                print(
+                    "[WORKING] Preparing two isolated builds. The real project "
+                    "will stay untouched until George chooses."
+                )
+                active_task = asyncio.create_task(
+                    broker.run_arena(
+                        command.text,
+                        test_command=command.test_command,
+                        participants=command.participants or None,
+                    )
+                )
+            elif command.kind == "choose":
+                run_id = command.run_id or broker.last_arena_id
+                if not run_id:
+                    print("[SYSTEM] No arena has run in this cockpit.")
+                else:
+                    running["active"] = True
+                    active_task = asyncio.create_task(
+                        broker.choose_arena(run_id, command.target or "")
+                    )
+            elif command.kind == "undo":
+                run_id = command.run_id or broker.last_arena_id
+                if not run_id:
+                    print("[SYSTEM] No arena has run in this cockpit.")
+                else:
+                    running["active"] = True
+                    active_task = asyncio.create_task(
+                        broker.undo_arena(run_id)
+                    )
+            elif command.kind == "replay":
+                run_id = command.run_id or broker.last_arena_id
+                if not run_id:
+                    print("[SYSTEM] No arena has run in this cockpit.")
+                else:
+                    try:
+                        print(broker.replay_arena(run_id))
+                    except CockpitError as exc:
+                        print(f"[SYSTEM] {exc}")
             if not active_task:
                 print("george> ", end="", flush=True)
     finally:
@@ -2130,7 +3866,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="George-controlled live Claude-Codex switchboard"
+        description="George-controlled live multi-model collaboration cockpit"
     )
     result.add_argument(
         "project",
@@ -2149,6 +3885,13 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--codex-source",
         help="Codex thread to fork on the cockpit's first run (default: canonical Inception thread)",
+    )
+    result.add_argument(
+        "--providers",
+        help=(
+            "comma-separated models: claude,codex,antigravity "
+            "(default: every installed provider; Gemini and agy mean antigravity)"
+        ),
     )
     result.add_argument(
         "--state", type=Path, default=DEFAULT_STATE_PATH, help=argparse.SUPPRESS
@@ -2176,6 +3919,24 @@ def parser() -> argparse.ArgumentParser:
         default=DEFAULT_MICROHISTORY_PATH,
         help=argparse.SUPPRESS,
     )
+    result.add_argument(
+        "--ledger",
+        type=Path,
+        default=DEFAULT_LEDGER_PATH,
+        help=argparse.SUPPRESS,
+    )
+    result.add_argument(
+        "--arena-root",
+        type=Path,
+        default=DEFAULT_ARENA_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    result.add_argument(
+        "--surface-root",
+        type=Path,
+        default=DEFAULT_SURFACE_ROOT,
+        help=argparse.SUPPRESS,
+    )
     return result
 
 
@@ -2188,59 +3949,134 @@ async def async_main(args: argparse.Namespace) -> int:
     cwd, cwd_source = resolve_working_directory(
         args.project, args.cwd, state, launch_cwd=Path.cwd()
     )
-    source = select_codex_source_thread(
-        state,
-        args.codex_source,
-        continuity_path=CONTINUITY_STATE_PATH,
-        session_root=CODEX_SESSION_ROOT,
-    )
-    if source:
-        state["codex_source_thread_id"] = source
-    else:
-        state.pop("codex_source_thread_id", None)
+    providers = select_providers(args.providers, state)
+    source: str | None = None
+    if "codex" in providers:
+        source = select_codex_source_thread(
+            state,
+            args.codex_source,
+            continuity_path=CONTINUITY_STATE_PATH,
+            session_root=CODEX_SESSION_ROOT,
+        )
+        if source:
+            state["codex_source_thread_id"] = source
+        else:
+            state.pop("codex_source_thread_id", None)
     state["cwd"] = str(cwd)
     state["cwd_source"] = cwd_source
+    state["providers"] = list(providers)
+    state.setdefault("guard_enabled", True)
     store.save()
     continuity = ContinuityEngine(args.covenant, args.microhistory, args.journal)
     instructions = endpoint_instructions(continuity.covenant, continuity.microhistory)
+
+    def remember_codex(thread_id: str) -> None:
+        state["codex_thread_id"] = thread_id
+        store.save()
 
     def remember_claude(session_id: str) -> None:
         state["claude_session_id"] = session_id
         store.save()
 
-    codex = CodexEndpoint(
-        cwd,
-        state.get("codex_thread_id"),
-        source,
-        error_log=args.error_log,
-        instructions=instructions,
-    )
-    claude = ClaudeEndpoint(
-        cwd,
-        state.get("claude_session_id"),
-        session_callback=remember_claude,
-        error_log=args.error_log,
-        instructions=instructions,
-    )
+    def remember_antigravity(conversation_id: str) -> None:
+        state["antigravity_conversation_id"] = conversation_id
+        store.save()
+
+    endpoints: dict[str, Any] = {}
+    if "codex" in providers:
+        endpoints["codex"] = CodexEndpoint(
+            cwd,
+            state.get("codex_thread_id"),
+            source,
+            thread_callback=remember_codex,
+            error_log=args.error_log,
+            instructions=instructions,
+        )
+    if "claude" in providers:
+        endpoints["claude"] = ClaudeEndpoint(
+            cwd,
+            state.get("claude_session_id"),
+            session_callback=remember_claude,
+            error_log=args.error_log,
+            instructions=instructions,
+        )
+    if "antigravity" in providers:
+        endpoints["antigravity"] = AntigravityEndpoint(
+            cwd,
+            state.get("antigravity_conversation_id"),
+            conversation_callback=remember_antigravity,
+            instructions=instructions,
+        )
+
+    def endpoint_factory(agent: str, worktree: Path) -> Any:
+        error_log = args.error_log.with_name(
+            f"{args.error_log.stem}-arena-{agent}{args.error_log.suffix}"
+        )
+        if agent == "codex":
+            return CodexEndpoint(
+                worktree,
+                None,
+                None,
+                error_log=error_log,
+                instructions=instructions,
+            )
+        if agent == "claude":
+            return ClaudeEndpoint(
+                worktree,
+                None,
+                error_log=error_log,
+                instructions=instructions,
+            )
+        if agent == "antigravity":
+            return AntigravityEndpoint(
+                worktree,
+                None,
+                instructions=instructions,
+            )
+        raise CockpitError(f"Unknown arena model: {agent}")
+
+    relationship: RelationshipLedger | None = None
     try:
         print(f"Opening project: {cwd.name}", flush=True)
-        print("Connecting Codex…", flush=True)
-        state["codex_thread_id"] = await codex.start()
-        store.save()
-        print("Codex connected.", flush=True)
-        print("Connecting Claude…", flush=True)
-        await claude.start()
-        print("Claude connected.", flush=True)
+        for provider in providers:
+            print(f"Connecting {provider.title()}…", flush=True)
+            await endpoints[provider].start()
+            if provider == "antigravity":
+                print(
+                    "Antigravity command found; sign-in is checked on first use.",
+                    flush=True,
+                )
+            else:
+                print(f"{provider.title()} connected.", flush=True)
+        relationship = RelationshipLedger(args.ledger)
+        try:
+            arena = ArenaManager(cwd, args.arena_root)
+        except OperatingRoomError:
+            arena = None
+        surfaces = SurfaceHub(args.surface_root, PROJECT)
         broker = Broker(
-            codex,
-            claude,
+            endpoints.get("codex"),
+            endpoints.get("claude"),
             Journal(args.journal),
             continuity=continuity,
+            antigravity=endpoints.get("antigravity"),
+            relationship=relationship,
+            surfaces=surfaces,
+            arena=arena,
+            endpoint_factory=endpoint_factory,
+            state=state,
+            state_store=store,
         )
+        broker.guard_enabled = bool(state.get("guard_enabled", True))
         await run_console(broker, state)
         return 0
     finally:
-        await asyncio.gather(codex.close(), claude.close(), return_exceptions=True)
+        await asyncio.gather(
+            *(endpoint.close() for endpoint in endpoints.values()),
+            return_exceptions=True,
+        )
+        if relationship is not None:
+            relationship.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2249,7 +4085,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         lock = CockpitLock(args.lock)
         return asyncio.run(async_main(args))
-    except CockpitError as exc:
+    except (CockpitError, OperatingRoomError) as exc:
         print(f"inception cockpit: {exc}", file=sys.stderr)
         return 1
     finally:

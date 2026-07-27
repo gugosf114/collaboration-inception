@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Resume George's canonical lived Codex thread.
+"""Launch the portable collaboration cockpit or George's private continuity.
 
-This is deliberately a thread pointer, not a personality prompt. The relationship
-history remains in Codex's native rollout and is continued with ``codex resume``.
+George's installation can reopen his canonical Codex thread. A downloaded copy
+without that private rollout opens the provider-neutral cockpit instead.
 """
 
 from __future__ import annotations
@@ -21,7 +21,11 @@ from typing import Any, Sequence
 
 PROJECT = Path(__file__).resolve().parents[1]
 STATE_PATH = PROJECT / "runtime" / "state.json"
-HOME = Path(os.environ.get("HOME", str(PROJECT.parent)))
+HOME = Path(
+    os.environ.get("HOME")
+    or os.environ.get("USERPROFILE")
+    or str(Path.home())
+).expanduser()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
 SESSION_ROOT = CODEX_HOME / "sessions"
 UUID_RE = re.compile(
@@ -218,7 +222,7 @@ def adopt_thread(
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Continue George and Sol's canonical lived Codex thread"
+        description="Open the Inception multi-model collaboration cockpit"
     )
     subcommands = result.add_subparsers(dest="command")
     for name in ("resume", "fork"):
@@ -229,7 +233,7 @@ def parser() -> argparse.ArgumentParser:
     subcommands.add_parser("server")
     subcommands.add_parser("pair")
     subcommands.add_parser(
-        "cockpit", help="open George's supervised live Claude-Codex switchboard"
+        "cockpit", help="open the supervised live multi-model cockpit"
     )
     adopt = subcommands.add_parser("adopt")
     adopt.add_argument("thread_id")
@@ -238,14 +242,20 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if not raw:
+        try:
+            state = load_state()
+            canonical_rollout(state)
+        except InceptionError:
+            raw = ["cockpit"]
+        else:
+            raw = ["resume"]
     if raw and raw[0] == "cockpit":
         from cockpit import main as cockpit_main
 
         return cockpit_main(raw[1:])
     known = {"resume", "fork", "status", "server", "pair", "adopt", "cockpit"}
-    if not raw:
-        raw = ["resume"]
-    elif raw[0] not in known and not raw[0].startswith("-"):
+    if raw[0] not in known and not raw[0].startswith("-"):
         raw = ["resume", *raw]
     args = parser().parse_args(raw)
 

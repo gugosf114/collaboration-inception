@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -62,6 +63,7 @@ class PostOfficeTests(unittest.TestCase):
             GATHER.slug("George + Sol / Continuity"), "george-sol-continuity"
         )
 
+    @unittest.skipIf(os.name == "nt", "Post office shell launchers are Unix-only")
     def test_shell_entrypoints_parse(self):
         for script in (ROOT / "postoffice" / "po", ROOT / "postoffice" / "collect.sh"):
             subprocess.run(["bash", "-n", str(script)], check=True)
