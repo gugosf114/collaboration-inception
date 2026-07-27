@@ -288,6 +288,27 @@ class ProviderSelectionTests(unittest.TestCase):
             MODULE.select_providers(None, {}, available=("claude",))
 
 
+class ModelSelectionTests(unittest.TestCase):
+    def test_quality_first_defaults_are_explicit(self):
+        self.assertEqual(MODULE.DEFAULT_CODEX_MODEL, "gpt-5.6-sol")
+        self.assertEqual(MODULE.DEFAULT_CODEX_REASONING_EFFORT, "max")
+        self.assertEqual(MODULE.DEFAULT_CLAUDE_MODEL, "claude-opus-4-8")
+        self.assertEqual(MODULE.DEFAULT_CLAUDE_EFFORT, "max")
+        self.assertEqual(
+            MODULE.DEFAULT_ANTIGRAVITY_MODEL,
+            "Gemini 3.1 Pro (High)",
+        )
+
+    def test_claude_command_pins_opus_4_8_instead_of_moving_alias(self):
+        command = MODULE.default_claude_command(Path("/tmp"), None)
+
+        self.assertEqual(
+            command[command.index("--model") + 1],
+            "claude-opus-4-8",
+        )
+        self.assertEqual(command[command.index("--effort") + 1], "max")
+
+
 class ProjectResolutionTests(unittest.TestCase):
     @staticmethod
     def make_project(home: Path, name: str) -> Path:
@@ -707,6 +728,26 @@ class ClaudePermissionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AntigravityEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_antigravity_refuses_a_silent_flash_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            helper = base / "fake_agy.py"
+            helper.write_text(
+                "print('Gemini 3.6 Flash (High)')\n",
+                encoding="utf-8",
+            )
+            endpoint = MODULE.AntigravityEndpoint(
+                base,
+                command=[sys.executable, str(helper)],
+                validate_model=True,
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.CockpitError,
+                "will not silently downgrade",
+            ):
+                await endpoint.start()
+
     async def test_native_antigravity_uses_sandboxed_print_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -730,6 +771,10 @@ class AntigravityEndpointTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("--sandbox", arguments)
             self.assertIn("--print", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--model") + 1],
+                "Gemini 3.1 Pro (High)",
+            )
             self.assertIn("SHARED CONTRACT", arguments[-1])
             self.assertTrue(endpoint.authenticated)
 
@@ -758,6 +803,10 @@ class AntigravityEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("--session-id", arguments)
             self.assertIn("yolo", arguments)
             self.assertIn("--prompt", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--model") + 1],
+                "gemini-3.1-pro-preview",
+            )
 
     async def test_antigravity_does_not_mistake_auth_timeout_for_an_answer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -835,6 +884,11 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(initialize[1]["capabilities"]["experimentalApi"])
             self.assertTrue(resume[1]["excludeTurns"])
             self.assertEqual(resume[1]["developerInstructions"], "SHARED CONTRACT TEST")
+            self.assertEqual(resume[1]["model"], "gpt-5.6-sol")
+            self.assertEqual(
+                resume[1]["config"]["model_reasoning_effort"],
+                "max",
+            )
             self.assertEqual(thread_id, THREAD)
             endpoint.error_handle.close()
 
@@ -930,6 +984,23 @@ class SlowEndpoint(FakeEndpoint):
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_names_each_requested_model(self):
+        codex = FakeEndpoint("codex")
+        codex.model_label = "GPT-5.6 Sol (max)"
+        claude = FakeEndpoint("claude")
+        claude.model_label = "Claude Opus 4.8 (max)"
+        broker = MODULE.Broker(codex, claude)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            MODULE.show_status(broker, {"cwd": "/tmp/project"})
+
+        rendered = output.getvalue()
+        self.assertIn("Codex:", rendered)
+        self.assertIn("[GPT-5.6 Sol (max)]", rendered)
+        self.assertIn("Claude:", rendered)
+        self.assertIn("[Claude Opus 4.8 (max)]", rendered)
+
     async def test_three_model_council_challenges_every_opening_answer(self):
         codex = FakeEndpoint("codex")
         claude = FakeEndpoint("claude")

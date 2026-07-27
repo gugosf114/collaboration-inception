@@ -23,6 +23,17 @@ connected to those command-line tools; it does not contain or share API keys.
 The older `gemini` command is also accepted as Antigravity. Current individual
 Google users should prefer `agy`.
 
+Inception chooses quality over cost. It explicitly requests:
+
+- GPT-5.6 Sol with maximum reasoning
+- Claude Opus 4.8 with maximum effort
+- Gemini 3.1 Pro High
+
+The cockpit prints the exact active choices at startup and under `/status`.
+These are deliberate pins, so another CLI's cheaper personal default cannot
+silently replace them. If Antigravity cannot provide Gemini 3.1 Pro High,
+Inception stops with a clear message instead of quietly using Flash.
+
 ## Install on Windows PowerShell
 
 ```powershell
@@ -133,6 +144,12 @@ Naming a tab removes ambiguity when several Chrome windows are open.
 Useful optional settings:
 
 ```text
+INCEPTION_CODEX_MODEL=gpt-5.6-sol
+INCEPTION_CODEX_REASONING_EFFORT=max
+INCEPTION_CLAUDE_MODEL=claude-opus-4-8
+INCEPTION_CLAUDE_EFFORT=max
+INCEPTION_ANTIGRAVITY_MODEL=Gemini 3.1 Pro (High)
+INCEPTION_GEMINI_MODEL=gemini-3.1-pro-preview
 INCEPTION_AGENT_BRIDGE_URL=https://your-private-bridge
 INCEPTION_BROWSER_SSH_HOST=your-windows-host
 INCEPTION_SCREEN_CAPTURE_COMMAND=your-capture-command

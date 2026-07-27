@@ -82,6 +82,27 @@ DEFAULT_MICROHISTORY_PATH = PROJECT / "context" / "MICROHISTORY_V1.md"
 IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
 PROVIDER_NAMES = ("claude", "codex", "antigravity")
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+DEFAULT_CODEX_MODEL = os.environ.get(
+    "INCEPTION_CODEX_MODEL", "gpt-5.6-sol"
+)
+DEFAULT_CODEX_REASONING_EFFORT = os.environ.get(
+    "INCEPTION_CODEX_REASONING_EFFORT", "max"
+)
+DEFAULT_CLAUDE_MODEL = os.environ.get(
+    "INCEPTION_CLAUDE_MODEL", "claude-opus-4-8"
+)
+DEFAULT_CLAUDE_EFFORT = os.environ.get("INCEPTION_CLAUDE_EFFORT", "max")
+DEFAULT_ANTIGRAVITY_MODEL = os.environ.get(
+    "INCEPTION_ANTIGRAVITY_MODEL", "Gemini 3.1 Pro (High)"
+)
+DEFAULT_GEMINI_MODEL = os.environ.get(
+    "INCEPTION_GEMINI_MODEL", "gemini-3.1-pro-preview"
+)
+MODEL_LABELS = {
+    "gpt-5.6-sol": "GPT-5.6 Sol",
+    "claude-opus-4-8": "Claude Opus 4.8",
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
+}
 BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
 PASTE_QUIET_SECONDS = 0.15
@@ -285,6 +306,11 @@ def executable_command(name: str, *arguments: str) -> list[str]:
             command,
         ]
     return [resolved, *arguments]
+
+
+def model_label(model: str, effort: str | None = None) -> str:
+    label = MODEL_LABELS.get(model, model)
+    return f"{label} ({effort})" if effort else label
 
 
 def select_providers(
@@ -947,6 +973,8 @@ class CodexEndpoint:
         error_log: Path = DEFAULT_ERROR_LOG,
         command: Sequence[str] | None = None,
         instructions: str = DISCUSSION_INSTRUCTIONS,
+        model: str = DEFAULT_CODEX_MODEL,
+        reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT,
     ):
         self.cwd = cwd
         self.thread_id = thread_id
@@ -959,6 +987,9 @@ class CodexEndpoint:
             else executable_command("codex", "app-server", "--stdio")
         )
         self.instructions = instructions
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.model_label = model_label(model, reasoning_effort)
         self.process: asyncio.subprocess.Process | None = None
         self.reader_task: asyncio.Task[None] | None = None
         self.pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -999,6 +1030,8 @@ class CodexEndpoint:
             "sandbox": "read-only",
             "approvalPolicy": "never",
             "developerInstructions": self.instructions,
+            "model": self.model,
+            "config": {"model_reasoning_effort": self.reasoning_effort},
         }
         if self.thread_id:
             response = await self._request(
@@ -1312,6 +1345,8 @@ def default_claude_command(
     cwd: Path,
     session_id: str | None,
     instructions: str = DISCUSSION_INSTRUCTIONS,
+    model: str = DEFAULT_CLAUDE_MODEL,
+    effort: str = DEFAULT_CLAUDE_EFFORT,
 ) -> list[str]:
     flags = [
         "claude",
@@ -1330,6 +1365,10 @@ def default_claude_command(
         "stdio",
         "--tools",
         "default",
+        "--model",
+        model,
+        "--effort",
+        effort,
         "--append-system-prompt",
         instructions,
     ]
@@ -1367,6 +1406,8 @@ class ClaudeEndpoint:
         error_log: Path = DEFAULT_ERROR_LOG,
         command: Sequence[str] | None = None,
         instructions: str = DISCUSSION_INSTRUCTIONS,
+        model: str = DEFAULT_CLAUDE_MODEL,
+        effort: str = DEFAULT_CLAUDE_EFFORT,
     ):
         self.cwd = cwd
         self.session_id = session_id
@@ -1374,6 +1415,9 @@ class ClaudeEndpoint:
         self.error_log = error_log
         self.command_override = list(command) if command else None
         self.instructions = instructions
+        self.model = model
+        self.effort = effort
+        self.model_label = model_label(model, effort)
         self.process: asyncio.subprocess.Process | None = None
         self.reader_task: asyncio.Task[None] | None = None
         self.active: _ClaudeTurn | None = None
@@ -1395,7 +1439,11 @@ class ClaudeEndpoint:
         if not self.error_handle or self.error_handle.closed:
             self.error_handle = self.error_log.open("ab", buffering=0)
         command = self.command_override or default_claude_command(
-            self.cwd, self.session_id, self.instructions
+            self.cwd,
+            self.session_id,
+            self.instructions,
+            self.model,
+            self.effort,
         )
         process_group: dict[str, Any]
         if os.name == "nt":
@@ -1757,6 +1805,8 @@ class AntigravityEndpoint:
         conversation_callback: Callable[[str], None] | None = None,
         command: Sequence[str] | None = None,
         instructions: str = DISCUSSION_INSTRUCTIONS,
+        model: str | None = None,
+        validate_model: bool | None = None,
     ):
         self.cwd = cwd
         self.conversation_id = conversation_id
@@ -1777,6 +1827,16 @@ class AntigravityEndpoint:
         else:
             self.command = []
             self._legacy_gemini = False
+        self.model = model or (
+            DEFAULT_GEMINI_MODEL
+            if self._legacy_gemini
+            else DEFAULT_ANTIGRAVITY_MODEL
+        )
+        self.model_label = model_label(self.model)
+        self.validate_model = (
+            command is None if validate_model is None else validate_model
+        )
+        self.model_checked = False
         self.process: asyncio.subprocess.Process | None = None
         self.active = False
         self.available = bool(self.command)
@@ -1795,6 +1855,48 @@ class AntigravityEndpoint:
             raise CockpitError(
                 "Neither Antigravity CLI (`agy`) nor legacy Gemini CLI is installed"
             )
+        if (
+            self.validate_model
+            and not self.legacy_gemini
+            and not self.model_checked
+        ):
+            process = await asyncio.create_subprocess_exec(
+                *self.command,
+                "models",
+                cwd=self.cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError as exc:
+                process.kill()
+                await process.wait()
+                raise CockpitError(
+                    "Antigravity model check timed out. Run `agy models` once."
+                ) from exc
+            detail = stderr.decode(errors="replace").strip()
+            if process.returncode != 0:
+                raise CockpitError(
+                    "Antigravity could not list its models"
+                    + (f": {detail}" if detail else ".")
+                )
+            available = {
+                line.strip()
+                for line in stdout.decode(errors="replace").splitlines()
+                if line.strip()
+            }
+            if self.model not in available:
+                raise CockpitError(
+                    f"Antigravity model {self.model!r} is not available. "
+                    "Run `agy models` to inspect this account; Inception will "
+                    "not silently downgrade to Flash."
+                )
+            self.model_checked = True
         return self.conversation_id or ""
 
     async def ask(
@@ -1827,6 +1929,7 @@ class AntigravityEndpoint:
                 f"answering:\n{paths}\n[End shared cockpit files]"
             )
         if self.legacy_gemini:
+            command.extend(("--model", self.model))
             session = self.conversation_id
             if session:
                 command.extend(("--resume", session))
@@ -1847,6 +1950,7 @@ class AntigravityEndpoint:
                 )
             )
         else:
+            command.extend(("--model", self.model))
             if self.conversation_id:
                 command.extend(("--conversation", self.conversation_id))
             for directory in shared_dirs:
@@ -3373,6 +3477,10 @@ def endpoint_connected(endpoint: Any) -> bool:
     return process is not None and getattr(process, "returncode", None) is None
 
 
+def endpoint_model_label(endpoint: Any) -> str:
+    return str(getattr(endpoint, "model_label", "provider default"))
+
+
 def show_status(broker: Broker, state: dict[str, Any]) -> None:
     cwd = Path(str(state.get("cwd") or PROJECT))
     print("\nCOCKPIT STATUS")
@@ -3393,7 +3501,8 @@ def show_status(broker: Broker, state: dict[str, Any]) -> None:
             status = "CONNECTED — waiting for George"
         else:
             status = "NOT CONNECTED"
-        print(f"{agent.title()}: {status}")
+        label = endpoint_model_label(broker.endpoints[agent])
+        print(f"{agent.title()}: {status} [{label}]")
     all_verified = all(
         endpoint_connected(broker.endpoints[agent])
         and not (
@@ -3702,7 +3811,11 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
             elif command.kind == "providers":
                 print(
                     "Connected models: "
-                    + ", ".join(name.title() for name in broker.provider_names)
+                    + ", ".join(
+                        f"{name.title()} "
+                        f"[{endpoint_model_label(broker.endpoints[name])}]"
+                        for name in broker.provider_names
+                    )
                 )
             elif command.kind == "context":
                 if not broker.continuity:
@@ -4172,7 +4285,11 @@ async def async_main(args: argparse.Namespace) -> int:
     try:
         print(f"Opening project: {cwd.name}", flush=True)
         for provider in providers:
-            print(f"Connecting {provider.title()}…", flush=True)
+            print(
+                f"Connecting {provider.title()} "
+                f"[{endpoint_model_label(endpoints[provider])}]…",
+                flush=True,
+            )
             await endpoints[provider].start()
             if provider == "antigravity":
                 print(
