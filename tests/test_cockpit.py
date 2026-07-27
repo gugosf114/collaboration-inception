@@ -238,25 +238,27 @@ class ProjectResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             last = self.make_project(home, "collaboration-inception")
+            expected = last.resolve()
 
             cwd, source = MODULE.resolve_working_directory(
                 [], None, {"cwd": str(last)}, launch_cwd=home, home=home
             )
 
-        self.assertEqual(cwd, last)
+        self.assertEqual(cwd, expected)
         self.assertEqual(source, "last project")
 
     def test_spoken_project_name_resolves_without_cd_or_hyphen(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             agent_bridge = self.make_project(home, "agent-bridge")
+            expected = agent_bridge.resolve()
             self.make_project(home, "collaboration-inception")
 
             cwd, source = MODULE.resolve_working_directory(
                 ["agent", "bridge"], None, {}, launch_cwd=home, home=home
             )
 
-        self.assertEqual(cwd, agent_bridge)
+        self.assertEqual(cwd, expected)
         self.assertEqual(source, "named project")
 
     def test_unknown_project_error_lists_valid_names(self):
