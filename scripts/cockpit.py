@@ -82,6 +82,10 @@ DEFAULT_MICROHISTORY_PATH = PROJECT / "context" / "MICROHISTORY_V1.md"
 IMAGE_SUFFIXES = frozenset({".gif", ".jpeg", ".jpg", ".png", ".webp"})
 PROVIDER_NAMES = ("claude", "codex", "antigravity")
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+BRACKETED_PASTE_START = "\x1b[200~"
+BRACKETED_PASTE_END = "\x1b[201~"
+PASTE_QUIET_SECONDS = 0.15
+PASTE_END_TIMEOUT_SECONDS = 2.0
 # Claude emits an image read as one base64 JSONL record. Asyncio's 64 KiB
 # default stream limit cuts that record in half and disconnects the endpoint.
 CLAUDE_STREAM_LIMIT = 40 * 1024 * 1024
@@ -3252,6 +3256,114 @@ class InputThread:
             self.loop.call_soon_threadsafe(self.queue.put_nowait, line)
 
 
+PROMPT_COMMANDS = frozenset(
+    {
+        "act",
+        "all",
+        "antigravity",
+        "agy",
+        "arena",
+        "both",
+        "bpoint",
+        "browser",
+        "browser-point",
+        "claude",
+        "codex",
+        "correct",
+        "council",
+        "file",
+        "gemini",
+        "google",
+        "look",
+        "off",
+        "outcome",
+        "pass",
+        "point",
+        "promise",
+        "recover",
+        "screen",
+        "steer",
+        "talk",
+    }
+)
+
+
+def command_accepts_paste_continuation(value: str) -> bool:
+    clean = value.replace(BRACKETED_PASTE_START, "").strip()
+    if clean.startswith("/"):
+        name = clean[1:].partition(" ")[0].lower()
+        return name in PROMPT_COMMANDS
+    return bool(
+        re.match(
+            r"^(?:talk|both|all|claude|codex|antigravity|agy|gemini|google)"
+            r"\s*!?\s*:",
+            clean,
+            re.IGNORECASE,
+        )
+    )
+
+
+async def collect_logical_input(
+    first: str | None,
+    queue: asyncio.Queue[str | None],
+    *,
+    quiet_seconds: float = PASTE_QUIET_SECONDS,
+) -> tuple[str | None, int, list[str | None]]:
+    """Reassemble a terminal paste that arrived as several physical rows."""
+    if first is None:
+        return None, 0, []
+    first_line = first.rstrip("\r\n")
+    bracketed = BRACKETED_PASTE_START in first_line
+    ended = BRACKETED_PASTE_END in first_line
+    lines = [
+        first_line.replace(BRACKETED_PASTE_START, "").replace(
+            BRACKETED_PASTE_END, ""
+        )
+    ]
+    deferred: list[str | None] = []
+    if ended or (not bracketed and not command_accepts_paste_continuation(first_line)):
+        return lines[0], 1, deferred
+
+    while True:
+        timeout = PASTE_END_TIMEOUT_SECONDS if bracketed else quiet_seconds
+        try:
+            following = await asyncio.wait_for(queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            break
+        if following is None:
+            deferred.append(None)
+            break
+        clean = following.rstrip("\r\n")
+        starts_paste = BRACKETED_PASTE_START in clean
+        if starts_paste:
+            bracketed = True
+        if (
+            not bracketed
+            and clean.strip()
+            and clean.lstrip().startswith("/")
+        ):
+            deferred.append(following)
+            break
+        ended = BRACKETED_PASTE_END in clean
+        lines.append(
+            clean.replace(BRACKETED_PASTE_START, "").replace(
+                BRACKETED_PASTE_END, ""
+            )
+        )
+        if ended:
+            break
+    return "\n".join(lines), len(lines), deferred
+
+
+def set_bracketed_paste(enabled: bool) -> bool:
+    """Ask POSIX terminals to mark pasted text so embedded newlines stay one input."""
+    if os.name == "nt" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    sys.stdout.write("\x1b[?2004h" if enabled else "\x1b[?2004l")
+    sys.stdout.flush()
+    return True
+
+
 def endpoint_connected(endpoint: Any) -> bool:
     if getattr(endpoint, "available", False) and not getattr(
         endpoint, "persistent_process", False
@@ -3448,8 +3560,16 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
 
     loop = asyncio.get_running_loop()
     inputs = InputThread(loop)
+    bracketed_paste_enabled = set_bracketed_paste(True)
+    deferred_inputs: deque[str | None] = deque()
+
+    async def next_input() -> str | None:
+        if deferred_inputs:
+            return deferred_inputs.popleft()
+        return await inputs.queue.get()
+
     inputs.start()
-    input_task: asyncio.Task[str | None] = asyncio.create_task(inputs.queue.get())
+    input_task: asyncio.Task[str | None] = asyncio.create_task(next_input())
     active_task: asyncio.Task[dict[str, TurnResult]] | None = None
     running = {"active": False}
 
@@ -3502,11 +3622,22 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
             if input_task not in completed:
                 continue
             line = await input_task
-            input_task = asyncio.create_task(inputs.queue.get())
+            joined_lines = 0
+            if line is not None:
+                line, joined_lines, deferred = await collect_logical_input(
+                    line, inputs.queue
+                )
+                deferred_inputs.extend(deferred)
+            input_task = asyncio.create_task(next_input())
             if line is None:
                 if active_task:
                     await broker.stop()
                 return
+            if joined_lines > 1:
+                print(
+                    f"[INPUT] Reassembled {joined_lines} pasted lines into one "
+                    f"{len(line.strip())}-character command."
+                )
             try:
                 command = parse_operator_command(line)
             except CockpitError as exc:
@@ -3862,6 +3993,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
             await input_task
         with contextlib.suppress(NotImplementedError):
             loop.remove_signal_handler(signal.SIGINT)
+        if bracketed_paste_enabled:
+            set_bracketed_paste(False)
 
 
 def parser() -> argparse.ArgumentParser:

@@ -203,6 +203,67 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(choose.run_id, "run-123")
 
 
+class LogicalInputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reassembles_the_exact_one_row_council_cutoff(self):
+        command = (
+            "/council 3 Design the strongest way to stop two AI models from "
+            "overwriting each other. Attack every weak assumption and finish "
+            "with one agreed testable solution."
+        )
+        self.assertEqual(command[:62], command.split(" overwriting", 1)[0])
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue.put_nowait(command[62:120] + "\n")
+        queue.put_nowait(command[120:] + "\n")
+
+        logical, line_count, deferred = await MODULE.collect_logical_input(
+            command[:62] + "\n",
+            queue,
+            quiet_seconds=0.01,
+        )
+
+        self.assertEqual(line_count, 3)
+        self.assertEqual(deferred, [])
+        assert logical is not None
+        parsed = MODULE.parse_operator_command(logical)
+        expected_topic = command.split(" ", 2)[2]
+        self.assertEqual(" ".join(parsed.text.split()), expected_topic)
+
+    async def test_bracketed_multiline_paste_keeps_embedded_newlines(self):
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue.put_nowait(
+            "second line\nthird line"
+            + MODULE.BRACKETED_PASTE_END
+            + "\n"
+        )
+
+        logical, line_count, deferred = await MODULE.collect_logical_input(
+            MODULE.BRACKETED_PASTE_START + "/council 2 first line\n",
+            queue,
+            quiet_seconds=0.01,
+        )
+
+        self.assertEqual(
+            logical,
+            "/council 2 first line\nsecond line\nthird line",
+        )
+        self.assertEqual(line_count, 2)
+        self.assertEqual(deferred, [])
+
+    async def test_a_second_pasted_command_is_deferred_not_swallowed(self):
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue.put_nowait("/quit\n")
+
+        logical, line_count, deferred = await MODULE.collect_logical_input(
+            "/talk 1 first command\n",
+            queue,
+            quiet_seconds=0.01,
+        )
+
+        self.assertEqual(logical, "/talk 1 first command")
+        self.assertEqual(line_count, 1)
+        self.assertEqual(deferred, ["/quit\n"])
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def test_codex_is_not_required_when_claude_and_antigravity_are_available(self):
         selected = MODULE.select_providers(
