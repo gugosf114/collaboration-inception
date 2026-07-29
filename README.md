@@ -1,11 +1,32 @@
 # Collaboration Inception
 
-One cockpit where George—or anyone who downloads it—can work with Claude,
-Codex, and Google Antigravity together.
+One operating room where a person can direct Claude, Codex, and Google
+Antigravity together from a terminal or a live Chrome side panel.
 
-It is not an automatic agent swarm. The person stays in control. Models can
-answer independently, challenge each other, inspect the same live evidence,
-build competing solutions, and remember what proved true.
+Models can answer independently, challenge each other, inspect the same live
+evidence, build competing solutions, and learn from outcomes. The operator owns
+the turn, can steer it while it runs, and approves consequential actions.
+
+## Capability stack
+
+- **One live channel:** streamed model output, interruption, steering, voice,
+  browser pointing, and explicit hand-back.
+- **Three collaboration modes:** independent answers, bounded model dialogue,
+  and a three-model council.
+- **Real working turns:** providers can inspect and change the selected
+  project; Codex runs through its native app-server protocol.
+- **Consequential-action gate:** push, release, deploy, send, payment, and
+  destructive actions pause for an operator decision.
+- **Shared evidence:** screen, browser, DOM target, image, and file evidence is
+  copied once and labeled for every model.
+- **Durable continuity:** corrections, promises, results, calibration,
+  task-matched episodes, counterevidence, and the current mission live in a
+  local SQLite ledger.
+- **Proof arena:** isolated Git worktrees let models attempt the same change,
+  run the same test, and present evidence before the operator chooses.
+
+See [Architecture](docs/ARCHITECTURE.md), [Security](docs/SECURITY.md), and the
+current [Verification record](docs/VERIFICATION.md).
 
 ## What the other person needs
 
@@ -65,6 +86,24 @@ inception cockpit
 
 On Termux, Claude may live inside Debian PRoot. The installer and cockpit
 detect that arrangement.
+
+## Add the Chrome side panel
+
+The terminal cockpit works by itself. The side panel adds the live channel,
+voice input, page pointing, control ownership, and approval cards.
+
+1. Open `chrome://extensions`.
+2. Turn on **Developer mode**.
+3. Select **Load unpacked** and choose this repository's `extension` folder.
+4. Run `inception cockpit`.
+5. Select the Inception toolbar icon, enter the six-digit pairing code printed
+   by the cockpit, and choose **Pair**.
+
+The bridge listens only on `127.0.0.1`. Pairing exchanges the one-time code for
+a bearer token stored in Chrome extension storage. The token is never placed in
+a URL. Change the port with `inception cockpit --bridge-port PORT`, or disable
+the HTTP bridge with `--no-bridge`. Terminal consequential-action approvals
+remain active when the browser bridge is disabled.
 
 ## First real test
 
@@ -173,10 +212,34 @@ message. Antigravity currently has no equivalent same-turn steering interface,
 so Inception interrupts it and continues the same conversation with George's
 guidance. `/listen` turns speech into the next full cockpit command.
 
+The side panel applies the same rule automatically: speech becomes `/steer`
+while work is active and `/both` while the operator owns the room. **Point**
+captures the clicked page element's selector, text, ARIA label, role, bounds,
+nearby DOM, URL, and page title. **Stop** interrupts live work. **Hand back**
+returns control after human browser activity.
+
+### Approve consequential actions
+
+```text
+/approve ID
+/approve-session ID
+/deny ID
+```
+
+Codex uses its native command and file-change approval requests. Claude and
+Antigravity use Inception's consequential-tool classifier. A request appears in
+the side panel and terminal; the model waits for **Allow once**, **Allow for
+session**, or **Deny**. Discussion turns remain read-only.
+
 ### Durable relationship memory
 
 ```text
 /memory
+/mission
+/mission set OUTCOME
+/mission done [NOTE]
+/evidence
+/evidence challenge ID COUNTEREVIDENCE
 /correct MODEL CORRECTION
 /promise add MODEL PROMISE
 /promise done ID [NOTE]
@@ -185,11 +248,25 @@ guidance. `/listen` turns speech into the next full cockpit command.
 /context [full|on|off]
 ```
 
-Inception stores corrections, promises, measured outcomes, model authority by
-category, and drift in a local SQLite ledger. It gives both models the same
-small relevant evidence packet. Current instructions always outrank old
-evidence. `/recover` starts a fresh model session while keeping the shared
-relationship record.
+Inception stores corrections, promises, measured outcomes, recommendations,
+calibration error, model authority by category, drift, missions, and
+task-matched evidence episodes in a local SQLite ledger. It gives every model
+the same small relevant packet. Every learned episode keeps its source
+exchange, confidence, useful future behavior, and counterevidence. Current
+instructions always outrank old evidence. `/recover` starts a fresh provider
+session while keeping the shared relationship record.
+
+Import an exported Codex archive without putting the archive into model
+context:
+
+```sh
+po index PATH_TO_MESSAGES_JSONL
+python3 scripts/ingest_history.py PATH_TO_MESSAGES_JSONL
+```
+
+`po` also provides bounded local search over the archive. The extractor records
+corrections, interruptions, approvals, and successes as fallible evidence;
+re-running it is idempotent.
 
 ### Isolated build arena
 
@@ -217,11 +294,41 @@ George's own installation can reopen his private canonical Codex history. A
 downloaded copy cannot access that history and starts its own persistent
 cockpit. The repository contains no account credentials or model sessions.
 
+The local bridge token, event stream, screenshots, transcripts, model session
+IDs, archive index, and ledger stay under ignored runtime or user-data paths.
+Review that local data before sharing a working directory.
+
+## Measure whether continuity helps
+
+The repository includes a blind three-condition evaluation:
+
+1. **clean** — no relationship context;
+2. **profile** — static covenant/profile only;
+3. **episodes** — Inception's task-matched evidence packet.
+
+```sh
+python3 scripts/continuity_eval.py prepare \
+  --clean clean.md --profile profile.md --episodes episodes.md \
+  --output-dir runtime/eval/blind --map runtime/eval/private-map.json
+
+# Fill runtime/eval/blind/judgments.json before opening the map.
+python3 scripts/continuity_eval.py score \
+  --map runtime/eval/private-map.json \
+  --judgments runtime/eval/blind/judgments.json \
+  --report runtime/eval/report.json
+```
+
+The rubric scores task success, directness, continuity, correction use, and
+calibration, then penalizes contradictions. Episode retrieval earns promotion
+only when it beats both simpler conditions.
+
 ## Honest limits
 
 - Inception needs two installed model commands, but neither has to be Codex.
 - Each provider's own subscription, quota, and sign-in rules still apply.
 - Browser capture needs a Chrome debugging connection and Node.js 22 or newer.
+- Voice input uses Chrome's Web Speech support and therefore depends on the
+  browser and operating system.
 - A non-interactive SSH session cannot capture the visible Windows desktop;
   the native Windows process or Agent Bridge route handles that case.
 - The arena can isolate file changes, but it cannot make an inherently
@@ -234,6 +341,14 @@ python3 -m unittest discover -s tests -v
 python3 scripts/cockpit.py --help
 node --check scripts/capture_browser.cjs
 node --check scripts/point_browser.cjs
+node --check scripts/review_extension_live.cjs
+node --check extension/background.js
+node --check extension/activity.js
+node --check extension/sidepanel.js
 ```
 
 GitHub Actions runs the test suite on both Ubuntu and native Windows.
+
+## License
+
+[MIT](LICENSE)

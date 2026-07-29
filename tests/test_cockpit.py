@@ -78,10 +78,31 @@ class CommandTests(unittest.TestCase):
         show = MODULE.parse_operator_command("/context")
         full = MODULE.parse_operator_command("/context full")
         disable = MODULE.parse_operator_command("/context off")
+        mission = MODULE.parse_operator_command(
+            "/mission set Ship a verified collaboration cockpit"
+        )
+        evidence = MODULE.parse_operator_command(
+            "/evidence challenge abcdef123456 Wrong source"
+        )
+        approval = MODULE.parse_operator_command(
+            "/approve-session abcdef123456"
+        )
 
         self.assertEqual((show.kind, show.text), ("context", ""))
         self.assertEqual((full.kind, full.text), ("context", "full"))
         self.assertEqual((disable.kind, disable.text), ("context", "off"))
+        self.assertEqual(
+            (mission.kind, mission.source, mission.text),
+            ("mission", "set", "Ship a verified collaboration cockpit"),
+        )
+        self.assertEqual(
+            (evidence.kind, evidence.run_id, evidence.text),
+            ("evidence", "abcdef123456", "Wrong source"),
+        )
+        self.assertEqual(
+            (approval.kind, approval.source, approval.run_id),
+            ("approval", "acceptForSession", "abcdef123456"),
+        )
 
     def test_parses_plain_status_and_project_commands(self):
         status = MODULE.parse_operator_command("/status")
@@ -865,6 +886,48 @@ class FakeCodexEndpoint(MODULE.CodexEndpoint):
 
 
 class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_permission_requests_wait_for_georges_decision(self):
+        callback = AsyncMock(return_value="acceptForSession")
+        endpoint = MODULE.CodexEndpoint(
+            Path("/tmp"),
+            THREAD,
+            None,
+            approval_callback=callback,
+        )
+        endpoint._send = AsyncMock()
+        endpoint.active = MODULE._CodexTurn(
+            done=asyncio.get_running_loop().create_future(),
+            emit=lambda _text: None,
+            working=True,
+        )
+        requested = {
+            "network": {"enabled": True},
+            "fileSystem": {"write": ["/tmp/elsewhere"]},
+        }
+
+        await endpoint._handle_server_request(
+            {
+                "id": 17,
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "reason": "Need another checked working root",
+                    "permissions": requested,
+                },
+            }
+        )
+
+        callback.assert_awaited_once()
+        self.assertEqual(
+            endpoint._send.await_args.args[0],
+            {
+                "id": 17,
+                "result": {
+                    "permissions": requested,
+                    "scope": "session",
+                },
+            },
+        )
+
     async def test_opts_into_experimental_api_before_excluding_large_history(self):
         with tempfile.TemporaryDirectory() as directory:
             endpoint = FakeCodexEndpoint()
@@ -901,9 +964,13 @@ class CodexHandshakeTests(unittest.IsolatedAsyncioTestCase):
         turns = [entry[1] for entry in endpoint.sent if entry[0] == "turn/start"]
         self.assertEqual(turns[0]["sandboxPolicy"]["type"], "readOnly")
         self.assertFalse(turns[0]["sandboxPolicy"]["networkAccess"])
-        self.assertEqual(turns[1]["sandboxPolicy"]["type"], "dangerFullAccess")
+        self.assertEqual(turns[1]["sandboxPolicy"]["type"], "workspaceWrite")
+        self.assertEqual(
+            turns[1]["sandboxPolicy"]["writableRoots"], [str(endpoint.cwd)]
+        )
+        self.assertTrue(turns[1]["sandboxPolicy"]["networkAccess"])
         self.assertEqual(turns[0]["approvalPolicy"], "never")
-        self.assertEqual(turns[1]["approvalPolicy"], "never")
+        self.assertEqual(turns[1]["approvalPolicy"], "unlessTrusted")
         self.assertEqual(turns[1]["cwd"], str(endpoint.cwd))
 
     async def test_codex_receives_the_shared_image_as_native_local_input(self):
@@ -984,6 +1051,27 @@ class SlowEndpoint(FakeEndpoint):
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_control_returns_to_george_after_a_provider_failure(self):
+        class FailingEndpoint(FakeEndpoint):
+            async def ask(self, prompt, emit, working=False, attachments=()):
+                raise RuntimeError("provider failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            live = MODULE.LiveBridge(Path(directory), port=0)
+            broker = MODULE.Broker(
+                FailingEndpoint("codex"),
+                FakeEndpoint("claude"),
+                live=live,
+            )
+
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(MODULE.CockpitError, "provider failed"):
+                    await broker.ask("both", "exercise failure cleanup")
+
+            self.assertFalse(live.state()["active"])
+            self.assertEqual(live.state()["control_owner"], "human")
+            self.assertFalse(broker.active_agents)
+
     async def test_status_names_each_requested_model(self):
         codex = FakeEndpoint("codex")
         codex.model_label = "GPT-5.6 Sol (max)"

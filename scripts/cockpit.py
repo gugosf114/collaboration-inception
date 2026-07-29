@@ -25,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 try:
     import fcntl  # type: ignore[import-not-found]
@@ -58,6 +58,23 @@ except ModuleNotFoundError:
         RelationshipLedger,
         SurfaceHub,
         deterministic_objections,
+    )
+
+try:
+    from live_bridge import (
+        DEFAULT_BRIDGE_PORT,
+        DEFAULT_BRIDGE_ROOT,
+        BridgeError,
+        LiveBridge,
+        consequential_tool_request,
+    )
+except ModuleNotFoundError:
+    from scripts.live_bridge import (  # type: ignore[no-redef]
+        DEFAULT_BRIDGE_PORT,
+        DEFAULT_BRIDGE_ROOT,
+        BridgeError,
+        LiveBridge,
+        consequential_tool_request,
     )
 
 
@@ -168,7 +185,10 @@ Share live evidence:
 Control and memory:
   /steer [MODEL] GUIDANCE                        redirect a running turn
   /stop                                          interrupt running work
+  /approve ID | /approve-session ID | /deny ID   answer an action approval
   /memory                                        corrections, promises, outcomes
+  /mission [set TEXT|done NOTE]                  inspect or update the live mission
+  /evidence [challenge ID TEXT]                  inspect or correct learned evidence
   /correct MODEL TEXT                            record an explicit correction
   /promise add MODEL TEXT                        record a promise
   /promise done ID [NOTE]                        resolve a promise
@@ -510,8 +530,9 @@ class StateStore:
 
 
 class Journal:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, live: LiveBridge | None = None):
         self.path = path
+        self.live = live
 
     def append(self, event: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -519,6 +540,8 @@ class Journal:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         os.chmod(self.path, 0o600)
+        if self.live is not None:
+            self.live.publish(f"journal.{event.get('type', 'event')}", record)
 
 
 STOP_WORDS = frozenset(
@@ -975,6 +998,9 @@ class CodexEndpoint:
         instructions: str = DISCUSSION_INSTRUCTIONS,
         model: str = DEFAULT_CODEX_MODEL,
         reasoning_effort: str = DEFAULT_CODEX_REASONING_EFFORT,
+        approval_callback: (
+            Callable[[str, str, dict[str, Any]], Awaitable[str]] | None
+        ) = None,
     ):
         self.cwd = cwd
         self.thread_id = thread_id
@@ -989,6 +1015,7 @@ class CodexEndpoint:
         self.instructions = instructions
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.approval_callback = approval_callback
         self.model_label = model_label(model, reasoning_effort)
         self.process: asyncio.subprocess.Process | None = None
         self.reader_task: asyncio.Task[None] | None = None
@@ -1083,7 +1110,11 @@ class CodexEndpoint:
                 )
             sandbox_policy: dict[str, Any]
             if working:
-                sandbox_policy = {"type": "dangerFullAccess"}
+                sandbox_policy = {
+                    "type": "workspaceWrite",
+                    "writableRoots": [str(self.cwd)],
+                    "networkAccess": True,
+                }
             else:
                 sandbox_policy = {"type": "readOnly", "networkAccess": False}
             response = await self._request(
@@ -1101,7 +1132,7 @@ class CodexEndpoint:
                     # turn/start overrides persist, so every turn explicitly resets
                     # the intended boundary instead of inheriting the last one.
                     "cwd": str(self.cwd),
-                    "approvalPolicy": "never",
+                    "approvalPolicy": "unlessTrusted" if working else "never",
                     "sandboxPolicy": sandbox_policy,
                 },
             )
@@ -1227,7 +1258,7 @@ class CodexEndpoint:
                 except json.JSONDecodeError:
                     continue
                 if "id" in message and "method" in message:
-                    await self._deny_server_request(message)
+                    await self._handle_server_request(message)
                 elif "id" in message:
                     future = self.pending.pop(message["id"], None)
                     if future and not future.done():
@@ -1246,21 +1277,66 @@ class CodexEndpoint:
                 if self.active and not self.active.done.done():
                     self.active.done.set_exception(error)
 
-    async def _deny_server_request(self, message: dict[str, Any]) -> None:
+    async def _handle_server_request(self, message: dict[str, Any]) -> None:
         method = message.get("method")
         request_id = message.get("id")
+        params = message.get("params")
+        detail = dict(params) if isinstance(params, dict) else {}
         if method in {
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
         }:
-            await self._send({"id": request_id, "result": {"decision": "cancel"}})
+            decision = "cancel"
+            if (
+                self.active is not None
+                and self.active.working
+                and self.approval_callback is not None
+            ):
+                kind = (
+                    "command"
+                    if method == "item/commandExecution/requestApproval"
+                    else "file-change"
+                )
+                decision = await self.approval_callback("codex", kind, detail)
+            await self._send({"id": request_id, "result": {"decision": decision}})
+            return
+        if method == "item/permissions/requestApproval":
+            decision = "cancel"
+            if (
+                self.active is not None
+                and self.active.working
+                and self.approval_callback is not None
+            ):
+                decision = await self.approval_callback(
+                    "codex",
+                    "permissions",
+                    detail,
+                )
+            permissions = (
+                detail.get("permissions", {})
+                if decision in {"accept", "acceptForSession"}
+                else {}
+            )
+            await self._send(
+                {
+                    "id": request_id,
+                    "result": {
+                        "permissions": permissions,
+                        "scope": (
+                            "session"
+                            if decision == "acceptForSession"
+                            else "turn"
+                        ),
+                    },
+                }
+            )
             return
         await self._send(
             {
                 "id": request_id,
                 "error": {
                     "code": -32000,
-                    "message": "George Cockpit cannot service an interactive approval",
+                    "message": f"Inception does not yet service {method}",
                 },
             }
         )
@@ -1408,6 +1484,9 @@ class ClaudeEndpoint:
         instructions: str = DISCUSSION_INSTRUCTIONS,
         model: str = DEFAULT_CLAUDE_MODEL,
         effort: str = DEFAULT_CLAUDE_EFFORT,
+        approval_callback: (
+            Callable[[str, str, dict[str, Any]], Awaitable[str]] | None
+        ) = None,
     ):
         self.cwd = cwd
         self.session_id = session_id
@@ -1417,6 +1496,7 @@ class ClaudeEndpoint:
         self.instructions = instructions
         self.model = model
         self.effort = effort
+        self.approval_callback = approval_callback
         self.model_label = model_label(model, effort)
         self.process: asyncio.subprocess.Process | None = None
         self.reader_task: asyncio.Task[None] | None = None
@@ -1647,10 +1727,33 @@ class ClaudeEndpoint:
         if subtype == "can_use_tool":
             turn = self.active
             if turn is not None and turn.working:
-                response_data = {
-                    "behavior": "allow",
-                    "updatedInput": request.get("input") or {},
-                }
+                tool_name = str(request.get("tool_name") or "")
+                tool_input = request.get("input") or {}
+                needs_approval = (
+                    isinstance(tool_input, dict)
+                    and consequential_tool_request(tool_name, tool_input)
+                )
+                if needs_approval and self.approval_callback is not None:
+                    decision = await self.approval_callback(
+                        "claude",
+                        "tool",
+                        {
+                            "tool_name": tool_name,
+                            "input": tool_input,
+                        },
+                    )
+                else:
+                    decision = "accept"
+                if decision in {"accept", "acceptForSession"}:
+                    response_data = {
+                        "behavior": "allow",
+                        "updatedInput": tool_input,
+                    }
+                else:
+                    response_data = {
+                        "behavior": "deny",
+                        "message": "George declined this consequential action.",
+                    }
             elif (
                 turn is not None
                 and request.get("tool_name") == "Read"
@@ -1807,11 +1910,15 @@ class AntigravityEndpoint:
         instructions: str = DISCUSSION_INSTRUCTIONS,
         model: str | None = None,
         validate_model: bool | None = None,
+        approval_callback: (
+            Callable[[str, str, dict[str, Any]], Awaitable[str]] | None
+        ) = None,
     ):
         self.cwd = cwd
         self.conversation_id = conversation_id
         self.conversation_callback = conversation_callback
         self.instructions = instructions
+        self.approval_callback = approval_callback
         if command:
             self.command = list(command)
             self._legacy_gemini = any(
@@ -1909,6 +2016,18 @@ class AntigravityEndpoint:
         if self.active:
             raise CockpitError("Antigravity already has an active turn")
         await self.start()
+        if (
+            working
+            and self.approval_callback is not None
+            and consequential_tool_request("prompt", {"prompt": prompt})
+        ):
+            decision = await self.approval_callback(
+                "antigravity",
+                "consequential-turn",
+                {"prompt": compact_text(prompt, 4_000)},
+            )
+            if decision not in {"accept", "acceptForSession"}:
+                raise CockpitError("George declined Antigravity's consequential turn")
         delivered = prompt
         if not self.seeded:
             delivered = f"{self.instructions}\n\n{prompt}"
@@ -2074,11 +2193,23 @@ class AntigravityEndpoint:
 
 
 class LabeledOutput:
-    def __init__(self, visible: bool = True):
+    def __init__(
+        self,
+        visible: bool = True,
+        live: LiveBridge | None = None,
+        turn_id: str = "",
+    ):
         self.visible = visible
         self.buffers = {"claude": "", "codex": ""}
+        self.live = live
+        self.turn_id = turn_id
 
     def feed(self, agent: str, text: str) -> None:
+        if self.live is not None and text:
+            self.live.publish(
+                "model.delta",
+                {"agent": agent, "turn_id": self.turn_id, "text": text},
+            )
         if not self.visible:
             return
         buffer = self.buffers.get(agent, "") + text.replace("\r", "")
@@ -2121,6 +2252,7 @@ class Broker:
         endpoint_factory: Callable[[str, Path], Any] | None = None,
         state: dict[str, Any] | None = None,
         state_store: StateStore | None = None,
+        live: LiveBridge | None = None,
     ):
         self.endpoints: dict[str, Any] = {}
         for name, endpoint in (
@@ -2140,6 +2272,7 @@ class Broker:
         self.endpoint_factory = endpoint_factory
         self.state = state
         self.state_store = state_store
+        self.live = live
         self.attachment_dir = attachment_dir
         first = next(iter(self.endpoints.values()))
         self.cwd = Path(getattr(first, "cwd", Path.cwd())).expanduser().resolve()
@@ -2242,9 +2375,20 @@ class Broker:
                     else "no relevant prior exchange"
                 )
                 print(f"[CONTINUITY] Relationship lineage active; {detail} injected.")
-        output = LabeledOutput(visible=visible)
+        output = LabeledOutput(visible=visible, live=self.live, turn_id=turn_id)
         self.active_agents = set(agents)
         self.active_modes = {agent: mode for agent in agents}
+        if self.live is not None:
+            self.live.set_active(True, agents)
+            self.live.publish(
+                "turn.started",
+                {
+                    "turn_id": turn_id,
+                    "agents": agents,
+                    "mode": mode,
+                    "prompt": prompt,
+                },
+            )
         if self.journal and record:
             self.journal.append(
                 {
@@ -2274,40 +2418,68 @@ class Broker:
                 self.active_agents.discard(agent)
                 self.active_modes.pop(agent, None)
 
-        pairs = await asyncio.gather(*(run(agent) for agent in agents))
         results: dict[str, TurnResult] = {}
         errors: list[str] = []
-        for agent, value in pairs:
-            if isinstance(value, Exception):
-                errors.append(f"{agent}: {value}")
-                continue
-            results[agent] = value
-            if value.text and remember:
-                self.last[agent] = value.text
-            if value.text and learn and self.relationship is not None:
-                self.relationship.observe_answer(
-                    agent,
-                    value.text,
-                    turn_id=turn_id,
-                    category=self._category(prompt),
-                )
-            if self.journal and record:
-                self.journal.append(
+        completed = False
+        try:
+            pairs = await asyncio.gather(*(run(agent) for agent in agents))
+            for agent, value in pairs:
+                if isinstance(value, Exception):
+                    errors.append(f"{agent}: {value}")
+                    continue
+                results[agent] = value
+                if value.text and remember:
+                    self.last[agent] = value.text
+                if value.text and learn and self.relationship is not None:
+                    self.relationship.observe_answer(
+                        agent,
+                        value.text,
+                        turn_id=turn_id,
+                        category=self._category(prompt),
+                    )
+                if self.journal and record:
+                    self.journal.append(
+                        {
+                            "type": "answer",
+                            "turn_id": turn_id,
+                            "agent": agent,
+                            "status": value.status,
+                            "text": value.text,
+                        }
+                    )
+                if self.live is not None:
+                    self.live.publish(
+                        "model.answer",
+                        {
+                            "turn_id": turn_id,
+                            "agent": agent,
+                            "status": value.status,
+                            "text": value.text,
+                        },
+                    )
+            if errors:
+                raise CockpitError("; ".join(errors))
+            if remember:
+                self.last_agents = [
+                    agent
+                    for agent in agents
+                    if agent in results and results[agent].text
+                ]
+            completed = True
+            return results
+        finally:
+            self.active_agents.clear()
+            self.active_modes.clear()
+            if self.live is not None:
+                self.live.set_active(False)
+                self.live.publish(
+                    "turn.completed",
                     {
-                        "type": "answer",
                         "turn_id": turn_id,
-                        "agent": agent,
-                        "status": value.status,
-                        "text": value.text,
-                    }
+                        "agents": agents,
+                        "errors": errors or ([] if completed else ["turn aborted"]),
+                    },
                 )
-        if errors:
-            raise CockpitError("; ".join(errors))
-        if remember:
-            self.last_agents = [
-                agent for agent in agents if agent in results and results[agent].text
-            ]
-        return results
 
     @staticmethod
     def _category(prompt: str) -> str:
@@ -3235,6 +3407,20 @@ def parse_operator_command(line: str) -> OperatorCommand:
         if not rest:
             raise CockpitError("Use /steer [MODEL] GUIDANCE")
         return OperatorCommand("steer", text=rest)
+    if name in {"approve", "approve-session", "deny"}:
+        identifier = rest.strip()
+        if not re.fullmatch(r"[a-f0-9]{12}", identifier):
+            raise CockpitError(f"Use /{name} APPROVAL_ID")
+        decision = {
+            "approve": "accept",
+            "approve-session": "acceptForSession",
+            "deny": "decline",
+        }[name]
+        return OperatorCommand(
+            "approval",
+            source=decision,
+            run_id=identifier,
+        )
     if name in {"listen", "voice"}:
         if rest:
             raise CockpitError("Use /listen, then speak the full cockpit command")
@@ -3246,6 +3432,31 @@ def parse_operator_command(line: str) -> OperatorCommand:
         return OperatorCommand("guard", text=setting)
     if name == "memory":
         return OperatorCommand("memory")
+    if name == "mission":
+        if not rest:
+            return OperatorCommand("mission", source="show")
+        action, _, value = rest.partition(" ")
+        if action not in {"set", "done"}:
+            raise CockpitError("Use /mission, /mission set TEXT, or /mission done [NOTE]")
+        if action == "set" and not value.strip():
+            raise CockpitError("Use /mission set TEXT")
+        return OperatorCommand("mission", source=action, text=value.strip())
+    if name == "evidence":
+        if not rest:
+            return OperatorCommand("evidence", source="show")
+        parts = rest.split(maxsplit=2)
+        if (
+            len(parts) != 3
+            or parts[0] != "challenge"
+            or not re.fullmatch(r"[a-f0-9]{12}", parts[1])
+        ):
+            raise CockpitError("Use /evidence or /evidence challenge ID COUNTEREVIDENCE")
+        return OperatorCommand(
+            "evidence",
+            source="challenge",
+            run_id=parts[1],
+            text=parts[2],
+        )
     if name == "correct":
         parts = rest.split(maxsplit=1)
         target = provider_name(parts[0]) if parts else None
@@ -3379,6 +3590,7 @@ PROMPT_COMMANDS = frozenset(
         "gemini",
         "google",
         "look",
+        "mission",
         "off",
         "outcome",
         "pass",
@@ -3388,6 +3600,7 @@ PROMPT_COMMANDS = frozenset(
         "screen",
         "steer",
         "talk",
+        "evidence",
     }
 )
 
@@ -3503,6 +3716,18 @@ def show_status(broker: Broker, state: dict[str, Any]) -> None:
             status = "NOT CONNECTED"
         label = endpoint_model_label(broker.endpoints[agent])
         print(f"{agent.title()}: {status} [{label}]")
+    if broker.live is not None:
+        live_state = broker.live.state()
+        if live_state["ready"]:
+            print(
+                f"Side panel: READY at {live_state['url']} "
+                f"({len(live_state['pending_approvals'])} approval(s) waiting)"
+            )
+        else:
+            print(
+                "Side panel: DISABLED — terminal consequential-action "
+                "approvals remain active"
+            )
     all_verified = all(
         endpoint_connected(broker.endpoints[agent])
         and not (
@@ -3585,6 +3810,10 @@ def show_memory(broker: Broker) -> None:
         return
     summary = broker.relationship.summary()
     print("\nLEARNED RELATIONSHIP STATE")
+    mission = summary["active_mission"]
+    print(
+        f"Active mission: {mission['text'] if mission else 'none set'}"
+    )
     promises = summary["open_promises"]
     print(f"Open promises: {len(promises)}")
     for promise in promises[:8]:
@@ -3610,6 +3839,27 @@ def show_memory(broker: Broker) -> None:
             )
     corrections = summary["recent_corrections"]
     print(f"Recent corrections retained: {len(corrections)}")
+
+
+def show_evidence(broker: Broker) -> None:
+    if broker.relationship is None:
+        print("Learned relationship ledger: unavailable")
+        return
+    episodes = broker.relationship.summary()["recent_episodes"]
+    print("\nRELATIONSHIP EVIDENCE")
+    if not episodes:
+        print("No extracted transcript episodes yet.")
+        return
+    for episode in episodes:
+        print(
+            f"- {episode['id']} [{episode['kind']}/{episode['status']}] "
+            f"{compact_text(episode['inference'], 220)}"
+        )
+        if episode["counterevidence"]:
+            print(
+                f"  Counterevidence: "
+                f"{compact_text(episode['counterevidence'], 180)}"
+            )
 
 
 def voice_command(text: str, active: bool = False) -> str:
@@ -3678,6 +3928,12 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
         return await inputs.queue.get()
 
     inputs.start()
+    if broker.live is not None:
+        broker.live.set_command_handler(
+            lambda command: loop.call_soon_threadsafe(
+                inputs.inject, command.rstrip("\r\n") + "\n"
+            )
+        )
     input_task: asyncio.Task[str | None] = asyncio.create_task(next_input())
     active_task: asyncio.Task[dict[str, TurnResult]] | None = None
     running = {"active": False}
@@ -3786,6 +4042,21 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                             inputs.inject(spoken + "\n")
                         except OperatingRoomError as exc:
                             print(f"[SYSTEM] {exc}")
+                elif command.kind == "approval":
+                    if broker.live is None:
+                        print("[SYSTEM] Live approvals are unavailable.")
+                    else:
+                        try:
+                            broker.live.resolve_approval(
+                                command.run_id or "",
+                                command.source or "decline",
+                            )
+                            print(
+                                f"[APPROVAL] {command.run_id} answered "
+                                f"{command.source}."
+                            )
+                        except BridgeError as exc:
+                            print(f"[SYSTEM] {exc}")
                 elif command.kind == "status":
                     show_status(broker, state)
                 elif command.kind == "quit":
@@ -3847,6 +4118,55 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 )
             elif command.kind == "memory":
                 show_memory(broker)
+            elif command.kind == "mission":
+                if broker.relationship is None:
+                    print("[SYSTEM] Learned relationship ledger is unavailable.")
+                else:
+                    try:
+                        if command.source == "set":
+                            identifier = broker.relationship.set_mission(command.text)
+                            print(f"[MISSION] Active mission saved as {identifier}.")
+                        elif command.source == "done":
+                            broker.relationship.complete_mission(command.text)
+                            print("[MISSION] Active mission completed.")
+                        else:
+                            mission = broker.relationship.active_mission()
+                            print(
+                                "[MISSION] "
+                                + (mission["text"] if mission else "No active mission.")
+                            )
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
+            elif command.kind == "evidence":
+                if broker.relationship is None:
+                    print("[SYSTEM] Learned relationship ledger is unavailable.")
+                elif command.source == "challenge":
+                    try:
+                        broker.relationship.challenge_episode(
+                            command.run_id or "", command.text
+                        )
+                        print(
+                            f"[MEMORY] Evidence {command.run_id} marked challenged."
+                        )
+                    except OperatingRoomError as exc:
+                        print(f"[SYSTEM] {exc}")
+                else:
+                    show_evidence(broker)
+            elif command.kind == "approval":
+                if broker.live is None:
+                    print("[SYSTEM] Live approvals are unavailable.")
+                else:
+                    try:
+                        broker.live.resolve_approval(
+                            command.run_id or "",
+                            command.source or "decline",
+                        )
+                        print(
+                            f"[APPROVAL] {command.run_id} answered "
+                            f"{command.source}."
+                        )
+                    except BridgeError as exc:
+                        print(f"[SYSTEM] {exc}")
             elif command.kind == "correct":
                 if broker.relationship is None:
                     print("[SYSTEM] Learned relationship ledger is unavailable.")
@@ -4183,6 +4503,23 @@ def parser() -> argparse.ArgumentParser:
         default=DEFAULT_SURFACE_ROOT,
         help=argparse.SUPPRESS,
     )
+    result.add_argument(
+        "--bridge-root",
+        type=Path,
+        default=DEFAULT_BRIDGE_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    result.add_argument(
+        "--bridge-port",
+        type=int,
+        default=int(os.environ.get("INCEPTION_BRIDGE_PORT", DEFAULT_BRIDGE_PORT)),
+        help="localhost port used by the Chrome side panel (default: 8765)",
+    )
+    result.add_argument(
+        "--no-bridge",
+        action="store_true",
+        help="disable the Chrome side-panel and LAV control bridge",
+    )
     return result
 
 
@@ -4228,6 +4565,16 @@ async def async_main(args: argparse.Namespace) -> int:
         state["antigravity_conversation_id"] = conversation_id
         store.save()
 
+    # The approval bus exists even when its HTTP surface is disabled, so
+    # --no-bridge never turns into a permission bypass.
+    live: LiveBridge | None = LiveBridge(args.bridge_root, port=args.bridge_port)
+    if not args.no_bridge:
+        live.start()
+        print(
+            f"Live side-panel bridge: {live.url} · pairing code {live.pair_code}",
+            flush=True,
+        )
+
     endpoints: dict[str, Any] = {}
     if "codex" in providers:
         endpoints["codex"] = CodexEndpoint(
@@ -4237,6 +4584,7 @@ async def async_main(args: argparse.Namespace) -> int:
             thread_callback=remember_codex,
             error_log=args.error_log,
             instructions=instructions,
+            approval_callback=live.request_approval if live else None,
         )
     if "claude" in providers:
         endpoints["claude"] = ClaudeEndpoint(
@@ -4245,6 +4593,7 @@ async def async_main(args: argparse.Namespace) -> int:
             session_callback=remember_claude,
             error_log=args.error_log,
             instructions=instructions,
+            approval_callback=live.request_approval if live else None,
         )
     if "antigravity" in providers:
         endpoints["antigravity"] = AntigravityEndpoint(
@@ -4252,6 +4601,7 @@ async def async_main(args: argparse.Namespace) -> int:
             state.get("antigravity_conversation_id"),
             conversation_callback=remember_antigravity,
             instructions=instructions,
+            approval_callback=live.request_approval if live else None,
         )
 
     def endpoint_factory(agent: str, worktree: Path) -> Any:
@@ -4265,6 +4615,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 None,
                 error_log=error_log,
                 instructions=instructions,
+                approval_callback=live.request_approval if live else None,
             )
         if agent == "claude":
             return ClaudeEndpoint(
@@ -4272,12 +4623,14 @@ async def async_main(args: argparse.Namespace) -> int:
                 None,
                 error_log=error_log,
                 instructions=instructions,
+                approval_callback=live.request_approval if live else None,
             )
         if agent == "antigravity":
             return AntigravityEndpoint(
                 worktree,
                 None,
                 instructions=instructions,
+                approval_callback=live.request_approval if live else None,
             )
         raise CockpitError(f"Unknown arena model: {agent}")
 
@@ -4307,7 +4660,7 @@ async def async_main(args: argparse.Namespace) -> int:
         broker = Broker(
             endpoints.get("codex"),
             endpoints.get("claude"),
-            Journal(args.journal),
+            Journal(args.journal, live=live),
             continuity=continuity,
             antigravity=endpoints.get("antigravity"),
             relationship=relationship,
@@ -4316,6 +4669,7 @@ async def async_main(args: argparse.Namespace) -> int:
             endpoint_factory=endpoint_factory,
             state=state,
             state_store=store,
+            live=live,
         )
         broker.guard_enabled = bool(state.get("guard_enabled", True))
         await run_console(broker, state)
@@ -4327,6 +4681,8 @@ async def async_main(args: argparse.Namespace) -> int:
         )
         if relationship is not None:
             relationship.close()
+        if live is not None:
+            live.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -4335,7 +4691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         lock = CockpitLock(args.lock)
         return asyncio.run(async_main(args))
-    except (CockpitError, OperatingRoomError) as exc:
+    except (CockpitError, OperatingRoomError, BridgeError) as exc:
         print(f"inception cockpit: {exc}", file=sys.stderr)
         return 1
     finally:

@@ -113,12 +113,18 @@ def install(bin_dir: Path, skip_preflight: bool = False) -> list[Path]:
     required = (
         PROJECT / "scripts" / "inception.py",
         PROJECT / "scripts" / "cockpit.py",
+        PROJECT / "scripts" / "live_bridge.py",
+        PROJECT / "scripts" / "ingest_history.py",
+        PROJECT / "scripts" / "continuity_eval.py",
         PROJECT / "scripts" / "operating_room.py",
         PROJECT / "scripts" / "capture_browser.cjs",
         PROJECT / "scripts" / "point_browser.cjs",
         PROJECT / "postoffice" / "po",
         PROJECT / "context" / "WORKING_COVENANT.md",
         PROJECT / "context" / "MICROHISTORY_V1.md",
+        PROJECT / "extension" / "manifest.json",
+        PROJECT / "extension" / "sidepanel.html",
+        PROJECT / "extension" / "sidepanel.js",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -170,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Launch: {args.bin_dir / 'inception'} cockpit")
     print("Use any two signed-in models; Codex is optional.")
     print("Inside the cockpit: /talk claude antigravity 2 YOUR QUESTION")
+    print(f"Chrome side panel: load unpacked extension from {PROJECT / 'extension'}")
     if backups:
         print("Previous launchers were preserved:")
         for path in backups:

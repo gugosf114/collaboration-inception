@@ -45,6 +45,7 @@ class RelationshipLedgerTests(unittest.TestCase):
                     "The regression test passed.",
                     prediction="The repair should stop the crash.",
                     falsifier="The crash recurs.",
+                    recommendation="Ship the repaired build.",
                 )
 
                 self.assertEqual(len(corrections), 1)
@@ -59,9 +60,48 @@ class RelationshipLedgerTests(unittest.TestCase):
                 self.assertEqual(authority["category"], "testing")
                 self.assertGreater(authority["score"], 0.5)
                 self.assertGreater(ledger.drift("codex")["score"], 0)
+                recorded = ledger.summary()["recent_outcomes"][0]
+                self.assertEqual(
+                    recorded["recommendation"], "Ship the repaired build."
+                )
+                self.assertEqual(recorded["calibration_error"], 0.0)
 
                 ledger.resolve_promise(promises[0], "Reported with proof.")
                 self.assertEqual(ledger.summary()["open_promises"], [])
+            finally:
+                ledger.close()
+
+    def test_tracks_one_active_mission_and_correctable_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = MODULE.RelationshipLedger(Path(directory) / "relationship.db")
+            try:
+                first = ledger.set_mission("Ship the live cockpit.")
+                self.assertEqual(ledger.active_mission()["id"], first)
+                second = ledger.set_mission("Prove the cockpit on one real task.")
+                self.assertEqual(ledger.active_mission()["id"], second)
+                episode = ledger.record_episode(
+                    source="codex",
+                    session_id="session",
+                    ordinal=4,
+                    kind="correction",
+                    agent="codex",
+                    category="testing",
+                    confidence=0.8,
+                    source_exchange={"george": "Run the real test."},
+                    inference="George requires real test evidence.",
+                    counterevidence="",
+                    useful_behavior="Run the test before claiming completion.",
+                    source_hash="unique-source",
+                )
+                self.assertTrue(episode)
+                ledger.challenge_episode(
+                    episode or "", "For trivial text edits, a full test is unnecessary."
+                )
+                packet = ledger.packet_for("test completion")
+                self.assertIn("ACTIVE MISSION", packet)
+                self.assertIn("COUNTEREVIDENCE", packet)
+                ledger.complete_mission("Proved.")
+                self.assertIsNone(ledger.active_mission())
             finally:
                 ledger.close()
 

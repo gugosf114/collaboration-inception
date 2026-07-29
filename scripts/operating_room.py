@@ -211,6 +211,41 @@ class RelationshipLedger:
                 run_id TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS episodes (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                session_id TEXT,
+                ordinal INTEGER,
+                kind TEXT NOT NULL,
+                agent TEXT,
+                category TEXT NOT NULL DEFAULT 'general',
+                confidence REAL NOT NULL,
+                source_exchange_json TEXT NOT NULL,
+                inference TEXT NOT NULL,
+                counterevidence TEXT NOT NULL DEFAULT '',
+                useful_behavior TEXT NOT NULL,
+                hypothesis_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                source_hash TEXT NOT NULL UNIQUE
+            );
+            CREATE INDEX IF NOT EXISTS episodes_kind_at
+                ON episodes(kind, at DESC);
+            CREATE INDEX IF NOT EXISTS episodes_status_at
+                ON episodes(status, at DESC);
+
+            CREATE TABLE IF NOT EXISTS missions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                source TEXT NOT NULL DEFAULT 'explicit',
+                completed_at TEXT,
+                completion_note TEXT
+            );
+            CREATE INDEX IF NOT EXISTS missions_status
+                ON missions(status, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS skills (
                 agent TEXT NOT NULL,
                 category TEXT NOT NULL,
@@ -231,7 +266,21 @@ class RelationshipLedger:
             );
             """
         )
+        self._ensure_column("outcomes", "recommendation", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column(
+            "outcomes", "calibration_error", "REAL NOT NULL DEFAULT 0"
+        )
         self.connection.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in columns:
+            self.connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+            )
 
     def close(self) -> None:
         self.connection.close()
@@ -391,6 +440,7 @@ class RelationshipLedger:
         confidence: float = 1.0,
         prediction: str = "",
         falsifier: str = "",
+        recommendation: str = "",
         run_id: str | None = None,
     ) -> str:
         self._require_agent(agent)
@@ -400,12 +450,15 @@ class RelationshipLedger:
         category = compact(category or "general", 80).lower()
         identifier = uuid.uuid4().hex[:12]
         at = now_iso()
+        actual = {"success": 1.0, "failure": 0.0, "mixed": 0.5}[normalized]
+        calibration_error = abs(max(0.0, min(1.0, confidence)) - actual)
         self.connection.execute(
             """
             INSERT INTO outcomes
                 (id, at, agent, category, verdict, confidence,
-                 prediction, falsifier, note, run_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 prediction, falsifier, note, run_id, recommendation,
+                 calibration_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 identifier,
@@ -418,6 +471,8 @@ class RelationshipLedger:
                 compact(falsifier, 1_000),
                 compact(note, 2_000),
                 run_id,
+                compact(recommendation, 1_000),
+                calibration_error,
             ),
         )
         self.connection.execute(
@@ -449,12 +504,127 @@ class RelationshipLedger:
                 "verdict": normalized,
                 "prediction": prediction,
                 "falsifier": falsifier,
+                "recommendation": recommendation,
+                "calibration_error": calibration_error,
                 "run_id": run_id,
             },
             event_id=f"outcome-{identifier}",
         )
         self.connection.commit()
         return identifier
+
+    def record_episode(
+        self,
+        *,
+        source: str,
+        session_id: str | None,
+        ordinal: int | None,
+        kind: str,
+        agent: str | None,
+        category: str,
+        confidence: float,
+        source_exchange: Mapping[str, Any],
+        inference: str,
+        counterevidence: str,
+        useful_behavior: str,
+        source_hash: str,
+        hypothesis_id: str | None = None,
+        at: str | None = None,
+    ) -> str | None:
+        if agent is not None:
+            self._require_agent(agent)
+        normalized_kind = compact(kind.lower() or "evidence", 60)
+        identifier = uuid.uuid4().hex[:12]
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO episodes(
+                    id, at, source, session_id, ordinal, kind, agent, category,
+                    confidence, source_exchange_json, inference, counterevidence,
+                    useful_behavior, hypothesis_id, source_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identifier,
+                    at or now_iso(),
+                    compact(source, 200),
+                    compact(session_id or "", 200) or None,
+                    ordinal,
+                    normalized_kind,
+                    agent,
+                    compact(category or "general", 80).lower(),
+                    max(0.0, min(1.0, confidence)),
+                    json.dumps(dict(source_exchange), ensure_ascii=False),
+                    compact(inference, 2_000),
+                    compact(counterevidence, 2_000),
+                    compact(useful_behavior, 2_000),
+                    compact(hypothesis_id or "", 120) or None,
+                    source_hash,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return None
+        self.connection.commit()
+        return identifier
+
+    def challenge_episode(self, identifier: str, counterevidence: str) -> None:
+        changed = self.connection.execute(
+            """
+            UPDATE episodes
+            SET counterevidence=?, status='challenged'
+            WHERE id=?
+            """,
+            (compact(counterevidence, 2_000), identifier),
+        ).rowcount
+        self.connection.commit()
+        if changed != 1:
+            raise OperatingRoomError(f"Evidence episode {identifier!r} was not found")
+
+    def set_mission(self, text: str, source: str = "explicit") -> str:
+        clean = compact(text, 2_000)
+        if not clean:
+            raise OperatingRoomError("A mission cannot be empty")
+        self.connection.execute(
+            """
+            UPDATE missions
+            SET status='superseded', completed_at=?, completion_note='Superseded'
+            WHERE status='active'
+            """,
+            (now_iso(),),
+        )
+        identifier = uuid.uuid4().hex[:12]
+        self.connection.execute(
+            """
+            INSERT INTO missions(id, created_at, text, source)
+            VALUES (?, ?, ?, ?)
+            """,
+            (identifier, now_iso(), clean, compact(source, 80)),
+        )
+        self.connection.commit()
+        return identifier
+
+    def active_mission(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT id, created_at, text, source
+            FROM missions WHERE status='active'
+            ORDER BY created_at DESC, rowid DESC LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def complete_mission(self, note: str = "") -> None:
+        changed = self.connection.execute(
+            """
+            UPDATE missions
+            SET status='done', completed_at=?, completion_note=?
+            WHERE status='active'
+            """,
+            (now_iso(), compact(note, 1_000)),
+        ).rowcount
+        self.connection.commit()
+        if changed != 1:
+            raise OperatingRoomError("There is no active mission")
 
     def authority(self) -> list[dict[str, Any]]:
         rows = self.connection.execute(
@@ -517,13 +687,61 @@ class RelationshipLedger:
             for answer in recent_answers
             for marker in generic_markers
         )
-        score = min(100, (corrections * 18) + (failures * 22) + (generic * 12))
+        trajectory_markers = {
+            "generic": generic_markers,
+            "flattering": (
+                "you are absolutely right",
+                "brilliant",
+                "great question",
+                "excellent point",
+            ),
+            "defensive": (
+                "to be fair",
+                "i was trying to",
+                "my intention was",
+                "however, i",
+            ),
+            "argumentative": (
+                "you are mistaken",
+                "i disagree with your premise",
+                "as i already explained",
+            ),
+            "reckless": (
+                "no need to verify",
+                "definitely complete",
+                "guaranteed",
+                "cannot fail",
+            ),
+            "rabbit-hole": (
+                "comprehensive taxonomy",
+                "complete list of",
+                "all possible",
+                "one more improvement",
+            ),
+        }
+        signals = {
+            label: sum(
+                marker in answer.lower()
+                for answer in recent_answers
+                for marker in markers
+            )
+            for label, markers in trajectory_markers.items()
+        }
+        score = min(
+            100,
+            (corrections * 18)
+            + (failures * 22)
+            + sum(signals.values()) * 10,
+        )
         if score >= 65:
             state = "off"
         elif score >= 35:
             state = "drifting"
         else:
             state = "productive or insufficient evidence"
+        strongest = max(signals, key=signals.get)
+        if signals[strongest] > 0 and state != "productive or insufficient evidence":
+            state = strongest
         return {
             "agent": agent,
             "score": score,
@@ -531,6 +749,7 @@ class RelationshipLedger:
             "recent_corrections": corrections,
             "recent_failures": failures,
             "generic_markers": generic,
+            "trajectory_signals": signals,
         }
 
     def snapshot_trajectory(
@@ -587,7 +806,57 @@ class RelationshipLedger:
                 ORDER BY created_at DESC, rowid DESC LIMIT 3
             """
         ).fetchall()
+        episode_rows = self.connection.execute(
+            """
+            SELECT id, at, kind, agent, category, confidence, inference,
+                   counterevidence, useful_behavior, status
+            FROM episodes
+            WHERE status IN ('active', 'challenged')
+            ORDER BY at DESC, rowid DESC LIMIT 800
+            """
+        ).fetchall()
+        episode_scored: list[tuple[float, sqlite3.Row]] = []
+        for position, row in enumerate(episode_rows):
+            searchable = (
+                f"{row['category']} {row['inference']} {row['useful_behavior']} "
+                f"{row['counterevidence']}"
+            )
+            overlap = query & terms(searchable)
+            if not overlap:
+                continue
+            score = (
+                (5 * len(overlap))
+                + row["confidence"]
+                + max(0.0, 1.0 - (position / max(1, len(episode_rows))))
+            )
+            episode_scored.append((score, row))
+        selected_episodes = [
+            row
+            for _, row in sorted(
+                episode_scored, key=lambda item: item[0], reverse=True
+            )[:limit]
+        ]
         sections: list[str] = []
+        mission = self.active_mission()
+        if mission:
+            sections.append(f"ACTIVE MISSION: {compact(mission['text'], 700)}")
+        for row in selected_episodes:
+            status = (
+                " CHALLENGED—reconcile before applying"
+                if row["status"] == "challenged"
+                else ""
+            )
+            challenged = (
+                f" COUNTEREVIDENCE: {compact(row['counterevidence'], 350)}"
+                if row["counterevidence"]
+                else ""
+            )
+            sections.append(
+                f"EVIDENCE {row['id']} {row['kind'].upper()}{status}, confidence "
+                f"{row['confidence']:.2f}: {compact(row['inference'], 500)} "
+                f"FUTURE BEHAVIOR: {compact(row['useful_behavior'], 450)}"
+                f"{challenged}"
+            )
         for row in selected:
             agent = f" ({row['agent']})" if row["agent"] else ""
             sections.append(
@@ -626,12 +895,26 @@ class RelationshipLedger:
             dict(row)
             for row in self.connection.execute(
                 """
-                SELECT at, agent, category, verdict, confidence, note
+                SELECT at, agent, category, verdict, confidence, prediction,
+                       recommendation, falsifier, calibration_error, note
                 FROM outcomes ORDER BY at DESC, rowid DESC LIMIT 10
                 """
             )
         ]
+        episodes = [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT id, at, kind, agent, category, confidence, inference,
+                       counterevidence, useful_behavior, status
+                FROM episodes
+                ORDER BY at DESC, rowid DESC LIMIT 20
+                """
+            )
+        ]
         return {
+            "active_mission": self.active_mission(),
+            "recent_episodes": episodes,
             "open_promises": promises,
             "recent_corrections": corrections,
             "recent_outcomes": outcomes,

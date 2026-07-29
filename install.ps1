@@ -48,13 +48,19 @@ function Preserve-And-Write {
 $required = @(
     "scripts\inception.py",
     "scripts\cockpit.py",
+    "scripts\live_bridge.py",
+    "scripts\ingest_history.py",
+    "scripts\continuity_eval.py",
     "scripts\operating_room.py",
     "scripts\capture_browser.cjs",
     "scripts\point_browser.cjs",
     "scripts\capture_windows_screen.ps1",
     "scripts\listen_windows.ps1",
     "context\WORKING_COVENANT.md",
-    "context\MICROHISTORY_V1.md"
+    "context\MICROHISTORY_V1.md",
+    "extension\manifest.json",
+    "extension\sidepanel.html",
+    "extension\sidepanel.js"
 )
 foreach ($relative in $required) {
     $path = Join-Path $RepoDir $relative
@@ -136,3 +142,5 @@ Write-Host "  inception cockpit"
 Write-Host ""
 Write-Host "Use any two signed-in commands: Claude, Codex, or Antigravity (agy)."
 Write-Host "Codex is optional. Run each chosen model command once to finish its sign-in."
+Write-Host "Chrome side panel: load unpacked extension from:"
+Write-Host "  $(Join-Path $RepoDir 'extension')"
