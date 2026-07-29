@@ -24,6 +24,82 @@ CLAUDE_SESSION = "019f8888-1bb9-7230-b91f-f572d2cbc870"
 
 
 class CommandTests(unittest.TestCase):
+    def test_plain_language_phone_commands_describe_their_behavior(self):
+        ask_all = MODULE.parse_operator_command("/ask-all What should we ship?")
+        debate_all = MODULE.parse_operator_command(
+            "/debate-all What should we ship?"
+        )
+        consensus = MODULE.parse_operator_command(
+            "/consensus What should we ship?"
+        )
+        review = MODULE.parse_operator_command("/review What should we ship?")
+        fix_it = MODULE.parse_operator_command("/fix-it agy")
+        do_not_fix = MODULE.parse_operator_command("/do-not-fix")
+        ask_two = MODULE.parse_operator_command("/ask-two Find the risk")
+        talk_two = MODULE.parse_operator_command(
+            "/talk-two claude agy Find the risk"
+        )
+        ask_one = MODULE.parse_operator_command("/ask-one agy Find the risk")
+        work_one = MODULE.parse_operator_command("/work-one codex Repair it")
+        steer_all = MODULE.parse_operator_command("/steer-all Stop expanding scope")
+        steer_one = MODULE.parse_operator_command(
+            "/steer-one claude Check the failing test"
+        )
+
+        self.assertEqual(
+            (ask_all.kind, ask_all.target, ask_all.text),
+            ("ask", "all", "What should we ship?"),
+        )
+        self.assertEqual(
+            (debate_all.kind, debate_all.replies), ("council", 2)
+        )
+        self.assertEqual((consensus.kind, consensus.replies), ("consensus", 2))
+        self.assertEqual((review.kind, review.replies), ("consensus", 2))
+        self.assertEqual(fix_it.kind, "fix-consensus")
+        self.assertEqual(fix_it.target, "antigravity")
+        self.assertEqual(do_not_fix.kind, "decline-consensus")
+        self.assertEqual((ask_two.kind, ask_two.target), ("ask", "both"))
+        self.assertEqual(
+            (talk_two.kind, talk_two.participants, talk_two.replies),
+            ("talk", ("claude", "antigravity"), 2),
+        )
+        self.assertEqual((ask_one.kind, ask_one.target), ("ask", "antigravity"))
+        self.assertEqual((work_one.kind, work_one.target), ("act", "codex"))
+        self.assertEqual((steer_all.kind, steer_all.target), ("steer", None))
+        self.assertEqual((steer_one.kind, steer_one.target), ("steer", "claude"))
+
+    def test_plain_language_phone_commands_cover_approval_and_evidence(self):
+        approve = MODULE.parse_operator_command("/approve-once abcdef123456")
+        session = MODULE.parse_operator_command(
+            "/approve-for-session abcdef123456"
+        )
+        deny = MODULE.parse_operator_command("/deny-action abcdef123456")
+        screen = MODULE.parse_operator_command(
+            "/show-screen What is this warning?"
+        )
+        image = MODULE.parse_operator_command(
+            '/show-image "screen shot.png" What is wrong?'
+        )
+        point = MODULE.parse_operator_command(
+            '/point-to-image "screen shot.png" 20 30 What is this?'
+        )
+        file_command = MODULE.parse_operator_command(
+            '/show-file "report.pdf" Summarize this'
+        )
+        folder = MODULE.parse_operator_command(
+            '/inspect-folder codex "/tmp/my files" Find duplicate files'
+        )
+
+        self.assertEqual(approve.source, "accept")
+        self.assertEqual(session.source, "acceptForSession")
+        self.assertEqual(deny.source, "decline")
+        self.assertEqual(screen.kind, "screen")
+        self.assertEqual((image.kind, image.image), ("look", "screen shot.png"))
+        self.assertEqual((point.kind, point.point), ("point", (20, 30)))
+        self.assertEqual((file_command.kind, file_command.image), ("file", "report.pdf"))
+        self.assertEqual((folder.kind, folder.target), ("act", "codex"))
+        self.assertIn('Inspect folder "/tmp/my files".', folder.text)
+
     def test_parses_explicit_and_natural_turn_grants(self):
         explicit = MODULE.parse_operator_command("/both inspect this")
         natural = MODULE.parse_operator_command("Claude: challenge it")
@@ -71,7 +147,7 @@ class CommandTests(unittest.TestCase):
             MODULE.parse_operator_command("/act both implement it")
 
     def test_rejects_ungated_bare_text(self):
-        with self.assertRaisesRegex(MODULE.CockpitError, "/both"):
+        with self.assertRaisesRegex(MODULE.CockpitError, "/ask-all"):
             MODULE.parse_operator_command("everybody start talking")
 
     def test_parses_visible_continuity_controls(self):
@@ -585,6 +661,85 @@ class ContinuityTests(unittest.TestCase):
         self.assertLessEqual(len(packet.evidence), 2_400)
         self.assertIn("George's current message", packet.wrap("Current question"))
 
+    def test_retrieves_relevant_canonical_memory_without_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            covenant = root / "covenant.md"
+            microhistory = root / "microhistory.md"
+            index = root / "MEMORY.md"
+            style = root / "style.md"
+            unrelated = root / "unrelated.md"
+            covenant.write_text("Tell the truth.", encoding="utf-8")
+            microhistory.write_text(
+                "## 1. Working together\nInspect the same work.",
+                encoding="utf-8",
+            )
+            index.write_text(
+                "- [User communication style](style.md) — plain short language\n"
+                "- [Unrelated project](unrelated.md) — orchid inventory\n",
+                encoding="utf-8",
+            )
+            style.write_text(
+                "---\nnode_type: memory\n---\n"
+                "# Communication\nExplain technical work in plain short language.",
+                encoding="utf-8",
+            )
+            unrelated.write_text(
+                "# Orchid\nPrivate orchid inventory details.",
+                encoding="utf-8",
+            )
+            engine = MODULE.ContinuityEngine(
+                covenant,
+                microhistory,
+                root / "missing.jsonl",
+                canonical_memory_path=index,
+            )
+
+            packet = engine.packet_for(
+                "Explain the technical result in plain short language."
+            )
+
+            self.assertIn("CANONICAL MEMORY", packet.evidence)
+            self.assertIn("plain short language", packet.evidence)
+            self.assertNotIn("orchid inventory details", packet.evidence)
+            self.assertNotIn("node_type", packet.evidence)
+
+    def test_launch_history_bootstrap_is_automatic_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "messages.jsonl"
+            rows = [
+                {
+                    "source": "codex",
+                    "session_id": "session-one",
+                    "ordinal": 1,
+                    "role": "assistant",
+                    "text": "George should run the command.",
+                },
+                {
+                    "source": "codex",
+                    "session_id": "session-one",
+                    "ordinal": 2,
+                    "role": "user",
+                    "text": "You misunderstood the request. Do it directly.",
+                },
+            ]
+            history.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            ledger = MODULE.RelationshipLedger(root / "relationship.sqlite3")
+            try:
+                first = MODULE.bootstrap_relationship_history(ledger, (history,))
+                second = MODULE.bootstrap_relationship_history(ledger, (history,))
+
+                self.assertEqual(first["inserted"], 1)
+                self.assertEqual(second["inserted"], 0)
+                self.assertEqual(second["duplicates"], 1)
+                self.assertEqual(ledger.counts()["episodes"], 1)
+            finally:
+                ledger.close()
+
     def test_no_match_means_no_invented_episode(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -749,6 +904,29 @@ class ClaudePermissionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AntigravityEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_antigravity_resumes_cached_workspace_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            cache = base / "last_conversations.json"
+            cache.write_text(
+                json.dumps({str(base): THREAD}),
+                encoding="utf-8",
+            )
+            remembered = []
+            endpoint = MODULE.AntigravityEndpoint(
+                base,
+                command=[sys.executable, "-c", "print('unused')"],
+                conversation_callback=remembered.append,
+                validate_model=False,
+            )
+            endpoint.last_conversations_path = cache
+            endpoint.history_path = base / "missing-history.jsonl"
+
+            await endpoint.start()
+
+            self.assertEqual(endpoint.conversation_id, THREAD)
+            self.assertEqual(remembered, [THREAD])
+
     async def test_native_antigravity_refuses_a_silent_flash_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -1107,6 +1285,84 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Claude", challenge)
             self.assertIn("Codex", challenge)
             self.assertIn("Antigravity", challenge)
+
+    async def test_consensus_returns_one_answer_after_three_model_challenges(self):
+        codex = FakeEndpoint("codex")
+        claude = FakeEndpoint("claude")
+        antigravity = FakeEndpoint("antigravity")
+        broker = MODULE.Broker(codex, claude, antigravity=antigravity)
+
+        with redirect_stdout(io.StringIO()):
+            results = await broker.consensus("Choose the repair.", rounds=2)
+
+        self.assertEqual(set(results), {"codex"})
+        self.assertEqual(len(codex.calls), 4)
+        self.assertEqual(len(claude.calls), 3)
+        self.assertEqual(len(antigravity.calls), 3)
+        final_prompt = codex.calls[-1][0]
+        self.assertIn("one cumulative answer", final_prompt)
+        self.assertIn("Claude final council answer", final_prompt)
+        self.assertIn("Codex final council answer", final_prompt)
+        self.assertIn("Antigravity final council answer", final_prompt)
+        self.assertIn("Choose who should fix it", final_prompt)
+        self.assertEqual(broker.last_consensus, "codex answer")
+
+    async def test_council_criticism_is_not_learned_as_george_correction(self):
+        class CombativeEndpoint(FakeEndpoint):
+            async def ask(self, prompt, emit, working=False, attachments=()):
+                self.calls.append((prompt, working))
+                answer = f"{self.name}: You are wrong about the strongest point."
+                emit(answer)
+                return MODULE.TurnResult(self.name, answer)
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = MODULE.RelationshipLedger(
+                Path(directory) / "relationship.sqlite3"
+            )
+            try:
+                broker = MODULE.Broker(
+                    CombativeEndpoint("codex"),
+                    CombativeEndpoint("claude"),
+                    antigravity=CombativeEndpoint("antigravity"),
+                    relationship=ledger,
+                )
+
+                with redirect_stdout(io.StringIO()):
+                    await broker.consensus("Choose the strongest plan.", rounds=1)
+
+                corrections = ledger.connection.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='correction'"
+                ).fetchone()[0]
+                self.assertEqual(corrections, 0)
+            finally:
+                ledger.close()
+
+    async def test_direct_george_correction_becomes_retrievable_episode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = MODULE.RelationshipLedger(
+                Path(directory) / "relationship.sqlite3"
+            )
+            try:
+                broker = MODULE.Broker(
+                    FakeEndpoint("codex"),
+                    FakeEndpoint("claude"),
+                    relationship=ledger,
+                )
+                broker.last = {"codex": "George should run the command."}
+                broker.last_agents = ["codex"]
+
+                with redirect_stdout(io.StringIO()):
+                    await broker.ask(
+                        "codex",
+                        "You misunderstood the request. Do it directly.",
+                        mode="work",
+                    )
+
+                self.assertEqual(ledger.counts()["episodes"], 1)
+                packet = ledger.packet_for("misunderstood direct request")
+                self.assertIn("Do it directly", packet)
+            finally:
+                ledger.close()
 
     async def test_default_guard_checks_a_draft_before_the_only_working_turn(self):
         codex = FakeEndpoint("codex")

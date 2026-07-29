@@ -77,6 +77,15 @@ except ModuleNotFoundError:
         consequential_tool_request,
     )
 
+try:
+    from ingest_history import extract as extract_history_evidence
+    from ingest_history import load_messages as load_history_messages
+except ModuleNotFoundError:
+    from scripts.ingest_history import (  # type: ignore[no-redef]
+        extract as extract_history_evidence,
+        load_messages as load_history_messages,
+    )
+
 
 PROJECT = Path(__file__).resolve().parents[1]
 TERMUX_HOME = Path(
@@ -151,56 +160,61 @@ DISCUSSION_INSTRUCTIONS = COCKPIT_INSTRUCTIONS
 
 TURN_MODES = frozenset({"discussion", "work", "action"})
 
-HELP_TEXT = """Launch from Termux, PowerShell, Linux, or macOS:
-  inception cockpit [PROJECT]                    open or resume the cockpit
-  inception cockpit --providers claude,agy       choose installed models
+HELP_TEXT = """OPEN:
+  launch                                           open this project from Termux
 
-Think together:
-  /both QUESTION                                 default pair, independent
-  /all QUESTION                                  every model, independent
-  /talk [MODEL MODEL] [1-6] QUESTION             visible bounded dialogue
-  /council [1-3] QUESTION                        all three challenge each other
-  /pass SOURCE TARGET [NOTE]                     forward one complete answer
-  /last [MODEL]                                  show the latest answer
+ASK AND DEBATE:
+  /review YOUR QUESTION                            all 3 debate; 1 answer; asks to fix
+  /ask-all YOUR QUESTION                           all 3 answer separately
+  /debate-all YOUR QUESTION                        all 3 debate for 2 rounds
+  /ask-two YOUR QUESTION                           Claude + Codex answer separately
+  /talk-two MODEL MODEL YOUR QUESTION              the chosen 2 talk for 2 replies
+  /ask-one MODEL YOUR QUESTION                     only that model answers
 
-Work:
-  /MODEL REQUEST                                 one checked working turn
-  /act MODEL REQUEST                             explicit execution turn
-  /guard on|off|status                           pre-delivery objection checker
-  /arena [MODEL MODEL] [--test "CMD"] :: REQUEST isolated competing builds
-  /choose [ARENA_ID] MODEL                       apply the chosen attempt
-  /undo [ARENA_ID]                               revert a chosen attempt safely
-  /replay [ARENA_ID]                             show the complete arena record
+WORK AND STEER:
+  /fix-it MODEL                                    chosen model implements reviewed answer
+  /do-not-fix                                      leave everything unchanged
+  /work-one MODEL YOUR REQUEST                     only that model gets working tools
+  /steer-all YOUR CORRECTION                       redirect every model running now
+  /steer-one MODEL YOUR CORRECTION                 redirect only that running model
+  /stop-all                                        stop every model running now
 
-Share live evidence:
-  /file "PATH" QUESTION                          private file copy
-  /look "IMAGE" QUESTION                         same image to both
-  /point "IMAGE" X Y QUESTION                    mark one pixel location
-  /screen QUESTION                               capture the live screen
-  /browser [TAB ::] QUESTION                     capture a live browser tab
-  /browser-point "ELEMENT" QUESTION              mark a live page element
-  /browser-point TAB :: ELEMENT :: QUESTION      choose its browser tab
-  /listen                                        speak the next command
+APPROVE:
+  /approve-once ID                                 approve only this action
+  /approve-for-session ID                          approve this action for this session
+  /deny-action ID                                  reject this action
 
-Control and memory:
-  /steer [MODEL] GUIDANCE                        redirect a running turn
-  /stop                                          interrupt running work
-  /approve ID | /approve-session ID | /deny ID   answer an action approval
-  /memory                                        corrections, promises, outcomes
-  /mission [set TEXT|done NOTE]                  inspect or update the live mission
-  /evidence [challenge ID TEXT]                  inspect or correct learned evidence
-  /correct MODEL TEXT                            record an explicit correction
-  /promise add MODEL TEXT                        record a promise
-  /promise done ID [NOTE]                        resolve a promise
-  /outcome MODEL CATEGORY VERDICT [NOTE]         record measured authority
-  /recover MODEL REASON                          fresh session, shared memory kept
-  /context [full|on|off]                         continuity evidence controls
-  /status | /providers | /projects | /sessions   inspect the cockpit
-  /help | /quit
+SHOW SOMETHING:
+  /show-screen YOUR QUESTION                       capture the phone screen
+  /show-image "IMAGE PATH" YOUR QUESTION           share one image
+  /point-to-image "IMAGE PATH" X Y YOUR QUESTION   mark one pixel location
+  /show-file "FILE PATH" YOUR QUESTION             share one file, not a folder
+  /inspect-folder MODEL "FOLDER PATH" YOUR TASK    one model inspects a folder
+  /listen                                          speak the next command
 
-MODEL can be claude, codex, or antigravity. "agy" and "gemini" are aliases.
-Natural forms such as "talk: ...", "claude: ...", and "agy!: ..." also work.
-Group turns are read-only. Only one model gets working tools at a time.
+MISSION AND STATUS:
+  /set-mission YOUR GOAL                           save the current goal
+  /finish-mission YOUR NOTE                        mark the current goal finished
+  /show-memory                                     corrections, promises, outcomes
+  /show-status                                     current cockpit state
+  /show-last [MODEL]                               latest completed answer
+  /show-models | /show-projects | /show-sessions   inspect available choices
+  /exit                                            leave the cockpit
+
+MODEL means claude, codex, or agy. ID means copy the ID printed by the app.
+Words after a command are your own words. Do not type brackets from examples.
+
+Advanced compatible commands:
+  /guard on|off|status
+  /arena [MODEL MODEL] [--test "CMD"] :: REQUEST
+  /choose [ARENA_ID] MODEL | /undo [ARENA_ID] | /replay [ARENA_ID]
+  /pass SOURCE TARGET [NOTE] | /recover MODEL REASON
+  /context [full|on|off] | /evidence | /correct | /promise | /outcome
+  /browser [TAB ::] QUESTION | /browser-point TAB :: ELEMENT :: QUESTION
+  /help
+
+The old commands (/consensus, /all, /both, /council, /act, and others)
+still work. The clear commands above are the recommended phone interface.
 """
 
 
@@ -708,6 +722,188 @@ def continuity_terms(text: str) -> set[str]:
     }
 
 
+@dataclass(frozen=True)
+class CanonicalMemoryEntry:
+    title: str
+    description: str
+    path: Path
+
+
+class CanonicalMemory:
+    """Read-only, prompt-matched access to George's canonical memory index."""
+
+    ENTRY_RE = re.compile(
+        r"^\s*-\s+\[([^\]]+)\]\(([^)]+\.md)\)\s*(?:[—-]\s*(.*))?$"
+    )
+
+    def __init__(self, index_path: Path):
+        self.index_path = index_path.expanduser().resolve()
+        self.entries = self._load_index()
+
+    def _load_index(self) -> tuple[CanonicalMemoryEntry, ...]:
+        try:
+            lines = self.index_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return ()
+        root = self.index_path.parent
+        entries: list[CanonicalMemoryEntry] = []
+        for line in lines:
+            match = self.ENTRY_RE.match(line)
+            if not match:
+                continue
+            target = (root / match.group(2)).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError:
+                continue
+            if target.is_file():
+                entries.append(
+                    CanonicalMemoryEntry(
+                        match.group(1).strip(),
+                        (match.group(3) or "").strip(),
+                        target,
+                    )
+                )
+        return tuple(entries)
+
+    def packet_for(self, prompt: str, limit: int = 2, max_chars: int = 1_800) -> str:
+        query = continuity_terms(prompt)
+        if not query or not self.entries or limit <= 0:
+            return ""
+        scored: list[tuple[int, CanonicalMemoryEntry]] = []
+        for entry in self.entries:
+            overlap = query & continuity_terms(
+                f"{entry.title} {entry.description}"
+            )
+            if overlap:
+                scored.append((len(overlap), entry))
+        selected = [
+            entry
+            for _, entry in sorted(
+                scored,
+                key=lambda item: (
+                    item[0],
+                    item[1].title.lower(),
+                ),
+                reverse=True,
+            )[:limit]
+        ]
+        sections: list[str] = []
+        remaining = max_chars
+        for entry in selected:
+            excerpt = self._matched_excerpt(entry.path, query, min(900, remaining))
+            if not excerpt:
+                continue
+            section = f"CANONICAL MEMORY — {entry.title}:\n{excerpt}"
+            if len(section) > remaining:
+                section = compact_text(section, remaining)
+            sections.append(section)
+            remaining -= len(section) + 2
+            if remaining < 200:
+                break
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _matched_excerpt(path: Path, query: set[str], limit: int) -> str:
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        if not content:
+            return ""
+        content = re.sub(
+            r"\A---\s*\n.*?\n---\s*(?:\n|$)",
+            "",
+            content,
+            count=1,
+            flags=re.DOTALL,
+        ).strip()
+        chunks = [
+            chunk.strip()
+            for chunk in re.split(r"(?=^#{1,3}\s)", content, flags=re.MULTILINE)
+            if chunk.strip()
+        ]
+        scored = [
+            (len(query & continuity_terms(chunk)), position, chunk)
+            for position, chunk in enumerate(chunks)
+        ]
+        matched = [
+            chunk
+            for score, _, chunk in sorted(
+                scored,
+                key=lambda item: (item[0], -item[1]),
+                reverse=True,
+            )
+            if score > 0
+        ]
+        excerpt = "\n\n".join(matched[:2]) if matched else content
+        return compact_text(excerpt, limit)
+
+
+def discover_canonical_memory_index() -> Path | None:
+    override = os.environ.get("INCEPTION_MEMORY_INDEX")
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(
+        (
+            Path(
+                "/data/data/com.termux/files/usr/var/lib/proot-distro/"
+                "containers/debian/rootfs/root/.claude/projects/-root/"
+                "memory/MEMORY.md"
+            ),
+            Path("/root/.claude/projects/-root/memory/MEMORY.md"),
+        )
+    )
+    prefix = os.environ.get("PREFIX")
+    if prefix:
+        candidates.extend(
+            Path(prefix).glob(
+                "var/lib/proot-distro/containers/*/rootfs/root/"
+                ".claude/projects/-root/memory/MEMORY.md"
+            )
+        )
+    for candidate in candidates:
+        if candidate.expanduser().is_file():
+            return candidate.expanduser().resolve()
+    return None
+
+
+def discover_history_exports() -> tuple[Path, ...]:
+    override = os.environ.get("INCEPTION_HISTORY_EXPORT")
+    candidates = (
+        [Path(value) for value in override.split(os.pathsep) if value]
+        if override
+        else [TERMUX_HOME / "session-post-office" / "latest" / "messages.jsonl"]
+    )
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved.is_file() and resolved not in unique:
+            unique.append(resolved)
+    return tuple(unique)
+
+
+def bootstrap_relationship_history(
+    ledger: RelationshipLedger, paths: Sequence[Path]
+) -> dict[str, int]:
+    totals = {
+        "files": 0,
+        "sessions": 0,
+        "messages": 0,
+        "candidates": 0,
+        "inserted": 0,
+        "duplicates": 0,
+    }
+    for path in paths:
+        messages = load_history_messages((path,))
+        counts = extract_history_evidence(messages, ledger)
+        totals["files"] += 1
+        for key in ("sessions", "messages", "candidates", "inserted", "duplicates"):
+            totals[key] += counts[key]
+    return totals
+
+
 def load_context_document(path: Path, label: str, limit: int) -> str:
     try:
         content = path.read_text(encoding="utf-8").strip()
@@ -786,7 +982,11 @@ class ContinuityEngine:
     """Durable relationship calibration plus bounded cockpit-turn retrieval."""
 
     def __init__(
-        self, covenant_path: Path, microhistory_path: Path, journal_path: Path
+        self,
+        covenant_path: Path,
+        microhistory_path: Path,
+        journal_path: Path,
+        canonical_memory_path: Path | None = None,
     ):
         self.covenant_path = covenant_path
         self.microhistory_path = microhistory_path
@@ -798,6 +998,11 @@ class ContinuityEngine:
         self.microhistory_episode_count = len(
             re.findall(r"^## \d+\.", self.microhistory, re.MULTILINE)
         )
+        self.canonical = (
+            CanonicalMemory(canonical_memory_path)
+            if canonical_memory_path is not None
+            else None
+        )
         self.enabled = True
 
     def packet_for(self, prompt: str, limit: int = 2) -> ContinuityPacket:
@@ -806,6 +1011,7 @@ class ContinuityEngine:
         query = continuity_terms(prompt)
         if not query:
             return ContinuityPacket()
+        canonical = self.canonical.packet_for(prompt) if self.canonical else ""
         scored: list[tuple[float, int, dict[str, Any]]] = []
         episodes = self._episodes()
         for position, episode in enumerate(episodes):
@@ -826,10 +1032,12 @@ class ContinuityEngine:
                 scored, key=lambda item: (item[0], item[1]), reverse=True
             )[:limit]
         ]
-        if not selected:
+        if not selected and not canonical:
             return ContinuityPacket()
 
-        sections: list[str] = []
+        sections: list[str] = (
+            [canonical] if canonical else []
+        )
         ids: list[str] = []
         remaining = 2_400
         for episode in selected:
@@ -1952,6 +2160,13 @@ class AntigravityEndpoint:
         self.history_path = (
             Path.home() / ".gemini" / "antigravity-cli" / "history.jsonl"
         )
+        self.last_conversations_path = (
+            Path.home()
+            / ".gemini"
+            / "antigravity-cli"
+            / "cache"
+            / "last_conversations.json"
+        )
 
     @property
     def legacy_gemini(self) -> bool:
@@ -1962,6 +2177,10 @@ class AntigravityEndpoint:
             raise CockpitError(
                 "Neither Antigravity CLI (`agy`) nor legacy Gemini CLI is installed"
             )
+        if not self.legacy_gemini and not self.conversation_id:
+            conversation = self._latest_conversation()
+            if conversation:
+                self._remember_conversation(conversation)
         if (
             self.validate_model
             and not self.legacy_gemini
@@ -2168,6 +2387,16 @@ class AntigravityEndpoint:
             self.conversation_callback(conversation_id)
 
     def _latest_conversation(self) -> str | None:
+        try:
+            cached = json.loads(
+                self.last_conversations_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            cached = {}
+        if isinstance(cached, dict):
+            conversation = cached.get(str(self.cwd))
+            if valid_uuid(conversation):
+                return conversation
         if not self.history_path.is_file():
             return None
         latest: str | None = None
@@ -2278,6 +2507,7 @@ class Broker:
         self.cwd = Path(getattr(first, "cwd", Path.cwd())).expanduser().resolve()
         self.last_packet = ContinuityPacket()
         self.last: dict[str, str] = {}
+        self.last_consensus = ""
         self.last_agents: list[str] = []
         self.active_agents: set[str] = set()
         self.active_modes: dict[str, str] = {}
@@ -2360,7 +2590,7 @@ class Broker:
                 )
                 packet = ContinuityPacket(joined, packet.episode_ids)
             if learn:
-                self.relationship.observe_operator(prompt, self.last_agents)
+                self._observe_operator(prompt, turn_id=turn_id)
         self.last_packet = packet
         delivered_prompt = mode_prompt(packet.wrap(prompt), mode)
         if self.continuity is not None:
@@ -2397,6 +2627,7 @@ class Broker:
                     "target": target,
                     "mode": mode,
                     "text": prompt,
+                    "origin": "operator" if learn else "internal",
                     "attachments": [str(path) for path in attachments],
                     "continuity_episode_ids": list(packet.episode_ids),
                 }
@@ -2496,8 +2727,31 @@ class Broker:
                 return category
         return "general"
 
+    def _observe_operator(self, text: str, turn_id: str | None = None) -> None:
+        if self.relationship is not None:
+            self.relationship.observe_operator(
+                text,
+                self.last_agents,
+                prior_answers=self.last,
+                category=self._category(text),
+                session_id=turn_id,
+            )
+        if self.journal:
+            self.journal.append(
+                {
+                    "type": "operator",
+                    "turn_id": turn_id,
+                    "text": text,
+                }
+            )
+
     async def pass_answer(
-        self, source: str, target: str, note: str = ""
+        self,
+        source: str,
+        target: str,
+        note: str = "",
+        *,
+        learn: bool = True,
     ) -> dict[str, TurnResult]:
         if (
             source == target
@@ -2515,7 +2769,14 @@ class Broker:
         )
         if note:
             prompt += f"\n\nGeorge's instruction: {note}"
-        return await self.ask(target, prompt, mode="discussion")
+            if learn:
+                self._observe_operator(note)
+        return await self.ask(
+            target,
+            prompt,
+            mode="discussion",
+            learn=False,
+        )
 
     async def talk(
         self,
@@ -2534,6 +2795,7 @@ class Broker:
                 f"Connected models are: {', '.join(self.provider_names)}"
             )
         self.dialogue_stop_requested = False
+        self._observe_operator(topic)
         first, second = pair
         print(
             f"[TALK] Opening: {first.title()} and {second.title()} "
@@ -2551,6 +2813,7 @@ class Broker:
             mode="discussion",
             attachments=attachments,
             selected_agents=pair,
+            learn=False,
         )
         latest = dict(opening)
         if self.dialogue_stop_requested or any(
@@ -2576,6 +2839,7 @@ class Broker:
                     "agree with, and move the shared answer forward. Do not merely "
                     f"summarize.\n\nOriginal topic: {topic}"
                 ),
+                learn=False,
             )
             latest.update(response)
             if any(result.status != "completed" for result in response.values()):
@@ -2596,6 +2860,7 @@ class Broker:
         if not 1 <= rounds <= 3:
             raise CockpitError("Council rounds must be between 1 and 3")
         self.dialogue_stop_requested = False
+        self._observe_operator(topic)
         print("[COUNCIL] All three models are answering independently.")
         latest = await self.ask(
             "all",
@@ -2607,6 +2872,7 @@ class Broker:
             mode="discussion",
             attachments=attachments,
             selected_agents=names,
+            learn=False,
         )
         for round_number in range(1, rounds + 1):
             if self.dialogue_stop_requested:
@@ -2628,18 +2894,67 @@ class Broker:
                 mode="discussion",
                 attachments=attachments,
                 selected_agents=names,
+                learn=False,
             )
         print("[COUNCIL] The granted council is finished. Control returns to George.")
         return latest
 
+    async def consensus(
+        self,
+        topic: str,
+        rounds: int = 2,
+        scribe: str = "codex",
+        attachments: Sequence[Path] = (),
+    ) -> dict[str, TurnResult]:
+        """Run a three-model council, then deliver one cumulative answer."""
+        latest = await self.council(topic, rounds=rounds, attachments=attachments)
+        if self.dialogue_stop_requested:
+            return latest
+        transcript = "\n\n".join(
+            f"--- {agent.title()} final council answer ---\n{result.text}"
+            for agent, result in latest.items()
+        )
+        print(
+            f"[CONSENSUS] {scribe.title()} is combining the three checked "
+            "answers into one cumulative answer."
+        )
+        result = await self.ask(
+            scribe,
+            (
+                "George requested one cumulative answer after a full three-model "
+                "council. Combine the final council answers below. Preserve the "
+                "strongest points that survived challenge, resolve differences "
+                "when the evidence supports a resolution, and state any remaining "
+                "disagreement plainly. Deliver one answer, not three summaries. "
+                "Do not change anything. End with this exact final line: "
+                '"Choose who should fix it: /fix-it codex, /fix-it claude, '
+                'or /fix-it agy. Type /do-not-fix for no."\n\n'
+                f"Original question: {topic}\n\n{transcript}"
+            ),
+            mode="discussion",
+            attachments=attachments,
+            learn=False,
+        )
+        final = result.get(scribe)
+        if final and final.text:
+            self.last_consensus = final.text
+        return result
+
     async def guarded_ask(
-        self, target: str, prompt: str, mode: str = "work"
+        self,
+        target: str,
+        prompt: str,
+        mode: str = "work",
+        *,
+        learn: bool = True,
     ) -> dict[str, TurnResult]:
         if target not in self.endpoints:
             raise CockpitError(f"Unknown model: {target}")
+        if learn:
+            self._observe_operator(prompt)
         critics = [name for name in self.provider_names if name != target]
         if not critics:
-            return await self.ask(target, prompt, mode=mode)
+            return await self.ask(target, prompt, mode=mode, learn=False)
         critic_names = " and ".join(name.title() for name in critics)
         print(
             f"[CHECKER] {target.title()} is drafting. "
@@ -2715,9 +3030,11 @@ class Broker:
                 f"{chr(10).join('- ' + item for item in mechanical) or '- none'}"
             ),
             mode=mode,
+            learn=False,
         )
 
     async def steer(self, target: str | None, text: str) -> dict[str, bool]:
+        self._observe_operator(text)
         agents = (
             [target]
             if target
@@ -2762,6 +3079,7 @@ class Broker:
                 f"obey George's new guidance:\n\n{guidance}"
             ),
             mode=mode,
+            learn=False,
         )
 
     async def recover(self, agent: str, reason: str) -> dict[str, TurnResult]:
@@ -3287,12 +3605,105 @@ def parse_operator_command(line: str) -> OperatorCommand:
         )
     if not raw.startswith("/"):
         raise CockpitError(
-            "Start with /talk, /both, /all, /claude, /codex, or /antigravity "
-            "(or use 'talk: ...')"
+            "Start with /review, /ask-all, /ask-two, /ask-one, or /work-one"
         )
     name, _, rest = raw[1:].partition(" ")
     name = name.lower()
     rest = rest.strip()
+
+    # Plain-language phone commands. Keep the compact historical commands below
+    # as backwards-compatible aliases, but make the recommended vocabulary say
+    # exactly who acts and what will happen.
+    if name == "ask-all":
+        if not rest:
+            raise CockpitError("Use /ask-all YOUR QUESTION")
+        return OperatorCommand("ask", "all", rest)
+    if name == "debate-all":
+        if not rest:
+            raise CockpitError("Use /debate-all YOUR QUESTION")
+        return OperatorCommand("council", text=rest, replies=2)
+    if name in {"review", "consensus"}:
+        if not rest:
+            raise CockpitError("Use /review YOUR QUESTION")
+        return OperatorCommand("consensus", text=rest, replies=2)
+    if name == "fix-it":
+        target = provider_name(rest)
+        if not target:
+            raise CockpitError("Use /fix-it codex, /fix-it claude, or /fix-it agy")
+        return OperatorCommand("fix-consensus", target=target)
+    if name == "do-not-fix":
+        if rest:
+            raise CockpitError("Use /do-not-fix by itself")
+        return OperatorCommand("decline-consensus")
+    if name == "ask-two":
+        if not rest:
+            raise CockpitError("Use /ask-two YOUR QUESTION")
+        return OperatorCommand("ask", "both", rest)
+    if name == "talk-two":
+        command = talk_command(rest)
+        if len(command.participants) != 2:
+            raise CockpitError(
+                "Use /talk-two MODEL MODEL YOUR QUESTION"
+            )
+        return command
+    if name in {"ask-one", "work-one", "steer-one"}:
+        parts = rest.split(maxsplit=1)
+        target = provider_name(parts[0]) if parts else None
+        if len(parts) != 2 or not target:
+            raise CockpitError(f"Use /{name} MODEL YOUR WORDS")
+        kind = {
+            "ask-one": "ask",
+            "work-one": "act",
+            "steer-one": "steer",
+        }[name]
+        return OperatorCommand(kind, target=target, text=parts[1])
+    if name == "steer-all":
+        if not rest:
+            raise CockpitError("Use /steer-all YOUR CORRECTION")
+        return OperatorCommand("steer", text=rest)
+    if name == "inspect-folder":
+        try:
+            parts = shlex.split(rest)
+        except ValueError as exc:
+            raise CockpitError(f"Cannot parse /inspect-folder: {exc}") from exc
+        target = provider_name(parts[0]) if parts else None
+        if len(parts) < 3 or not target:
+            raise CockpitError(
+                'Use /inspect-folder MODEL "FOLDER PATH" YOUR TASK'
+            )
+        folder = parts[1]
+        task = " ".join(parts[2:])
+        return OperatorCommand(
+            "act",
+            target=target,
+            text=f'Inspect folder "{folder}". {task}',
+        )
+
+    clear_aliases = {
+        "approve-once": "approve",
+        "approve-for-session": "approve-session",
+        "deny-action": "deny",
+        "show-screen": "screen",
+        "show-image": "look",
+        "point-to-image": "point",
+        "show-file": "file",
+        "show-memory": "memory",
+        "show-status": "status",
+        "show-last": "last",
+        "show-models": "providers",
+        "show-projects": "projects",
+        "show-sessions": "sessions",
+        "stop-all": "stop",
+        "exit-app": "quit",
+    }
+    name = clear_aliases.get(name, name)
+    if name == "set-mission":
+        name = "mission"
+        rest = f"set {rest}".strip()
+    elif name == "finish-mission":
+        name = "mission"
+        rest = f"done {rest}".strip()
+
     normalized_name = provider_name(name)
     if name in {"both", "all"} or normalized_name:
         if not rest:
@@ -3576,6 +3987,9 @@ PROMPT_COMMANDS = frozenset(
         "act",
         "all",
         "antigravity",
+        "ask-all",
+        "ask-one",
+        "ask-two",
         "agy",
         "arena",
         "both",
@@ -3584,22 +3998,36 @@ PROMPT_COMMANDS = frozenset(
         "browser-point",
         "claude",
         "codex",
+        "consensus",
         "correct",
         "council",
+        "debate-all",
         "file",
+        "finish-mission",
         "gemini",
         "google",
+        "inspect-folder",
         "look",
         "mission",
         "off",
         "outcome",
         "pass",
         "point",
+        "point-to-image",
         "promise",
         "recover",
+        "review",
         "screen",
+        "set-mission",
+        "show-file",
+        "show-image",
+        "show-screen",
         "steer",
+        "steer-all",
+        "steer-one",
         "talk",
+        "talk-two",
+        "work-one",
         "evidence",
     }
 )
@@ -3781,12 +4209,19 @@ def show_context(broker: Broker, full: bool = False) -> None:
         return
     status = "on" if continuity.enabled else "off for retrieved evidence"
     print(f"Continuity retrieval: {status}")
-    print("Relationship lineage: active on both endpoints")
+    print("Relationship lineage: active on every connected model")
     print(
         "Chronological calibration: "
         f"{continuity.microhistory_episode_count} demonstrated exchanges "
         f"({len(continuity.microhistory):,} characters)"
     )
+    if continuity.canonical is not None:
+        print(
+            "Canonical memory: connected read-only "
+            f"({len(continuity.canonical.entries)} indexed topic files)"
+        )
+    else:
+        print("Canonical memory: no local index found")
     print("\n--- George–AI working covenant ---")
     print(continuity.covenant)
     print("--- End working covenant ---")
@@ -3809,7 +4244,13 @@ def show_memory(broker: Broker) -> None:
         print("Learned relationship ledger: unavailable")
         return
     summary = broker.relationship.summary()
+    counts = broker.relationship.counts()
     print("\nLEARNED RELATIONSHIP STATE")
+    print(
+        "Stored evidence: "
+        f"{counts['episodes']} episode(s), {counts['outcomes']} outcome(s), "
+        f"{counts['promises']} promise(s), {counts['missions']} mission(s)"
+    )
     mission = summary["active_mission"]
     print(
         f"Active mission: {mission['text'] if mission else 'none set'}"
@@ -3896,26 +4337,28 @@ def voice_command(text: str, active: bool = False) -> str:
 
 
 async def run_console(broker: Broker, state: dict[str, Any]) -> None:
-    print("\nGEORGE COCKPIT IS READY")
+    print("\nCOLLABORATION INCEPTION IS READY")
     show_status(broker, state)
     print("\nTYPE ONE OF THESE:")
-    print("/talk YOUR QUESTION       two models answer each other visibly")
+    print("/review YOUR QUESTION     all 3 debate, combine, and ask before fixing")
+    print("/ask-all YOUR QUESTION    all 3 answer separately")
+    print("/ask-two YOUR QUESTION    Claude and Codex answer separately")
     if len(broker.provider_names) >= 3:
-        print("/council YOUR QUESTION    Claude, Codex, and Antigravity challenge each other")
+        print("/debate-all YOUR QUESTION all 3 challenge each other for 2 rounds")
     print("/arena YOUR REQUEST       two isolated builds, tests, comparison, and a winner")
-    print("/screen YOUR QUESTION     capture the live screen for both models")
+    print("/show-screen YOUR QUESTION capture the live screen for both models")
     print("/browser YOUR QUESTION    capture the live browser for both models")
     print("/listen                    speak the next full cockpit command")
     print("/help                      show every command")
     if broker.continuity:
         print(
-            "Continuity memory: ON — both agents receive the shared working context."
+            "Continuity memory: ON — every connected model receives shared context."
         )
     print(
         f"Pre-delivery objection checker: "
         f"{'ON' if broker.guard_enabled else 'OFF'}."
     )
-    print("\ngeorge> ", end="", flush=True)
+    print("\nTYPE HERE> ", end="", flush=True)
 
     loop = asyncio.get_running_loop()
     inputs = InputThread(loop)
@@ -3966,7 +4409,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                         else:
                             statuses.append(f"{agent.title()}: {result.status.upper()}")
                     print(f"[DONE] {' | '.join(statuses)}")
-                    print("Both agents are waiting for your next instruction.")
+                    print("The models are waiting for your next instruction.")
                 except CockpitError as exc:
                     print(f"[PROBLEM] {exc}")
                     show_status(broker, state)
@@ -3982,7 +4425,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     )
                     continue
                 running["active"] = False
-                print("george> ", end="", flush=True)
+                print("TYPE HERE> ", end="", flush=True)
 
             if input_task not in completed:
                 continue
@@ -4008,11 +4451,11 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
             except CockpitError as exc:
                 print(f"[SYSTEM] {exc}")
                 if not active_task:
-                    print("george> ", end="", flush=True)
+                    print("TYPE HERE> ", end="", flush=True)
                 continue
             if command.kind == "empty":
                 if not active_task:
-                    print("george> ", end="", flush=True)
+                    print("TYPE HERE> ", end="", flush=True)
                 continue
             if active_task:
                 if command.kind == "stop":
@@ -4066,7 +4509,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     return
                 else:
                     print(
-                        "[SYSTEM] A turn is running. Use /steer, /listen, or /stop."
+                        "[SYSTEM] A turn is running. Use /steer-all, "
+                        "/steer-one, /listen, or /stop-all."
                     )
                 continue
             if command.kind == "quit":
@@ -4255,7 +4699,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 else:
                     print(
                         f"[WORKING] {command.target.title()} is working now. "
-                        "Type /steer to redirect or /stop to interrupt."
+                        "Type /steer-one MODEL to redirect or /stop-all to interrupt."
                     )
                     active_task = asyncio.create_task(
                         (
@@ -4269,7 +4713,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 pair = command.participants or broker.default_pair()
                 print(
                     "[WORKING] Two models are entering a visible read-only "
-                    f"dialogue with {command.replies} replies. Type /stop to interrupt."
+                    f"dialogue with {command.replies} replies. "
+                    "Type /stop-all to interrupt."
                 )
                 active_task = asyncio.create_task(
                     broker.talk(
@@ -4287,18 +4732,54 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 active_task = asyncio.create_task(
                     broker.council(command.text, rounds=command.replies)
                 )
+            elif command.kind == "consensus":
+                running["active"] = True
+                print(
+                    "[WORKING] All three models will answer, challenge each "
+                    "other for 2 rounds, produce one cumulative answer, and "
+                    "ask whether to fix it."
+                )
+                active_task = asyncio.create_task(
+                    broker.consensus(command.text, rounds=2)
+                )
+            elif command.kind == "fix-consensus":
+                if not broker.last_consensus:
+                    print("[SYSTEM] Run /review YOUR QUESTION first.")
+                else:
+                    assert command.target
+                    running["active"] = True
+                    print(
+                        f"[WORKING] {command.target.title()} is implementing "
+                        "the reviewed plan now."
+                    )
+                    active_task = asyncio.create_task(
+                        broker.guarded_ask(
+                            command.target,
+                            (
+                                "Implement the final reviewed consensus below. "
+                                "Merge overlapping actions so each is performed "
+                                "once. Resolve nothing by guessing. Test and verify "
+                                "the completed result before reporting success.\n\n"
+                                f"{broker.last_consensus}"
+                            ),
+                            mode="action",
+                            learn=False,
+                        )
+                    )
+            elif command.kind == "decline-consensus":
+                print("[SYSTEM] Nothing will be changed.")
             elif command.kind in {"look", "point"}:
                 assert command.image
                 running["active"] = True
                 if command.kind == "point":
                     print(
                         "[WORKING] Marking George's point, then both models "
-                        "will discuss the same image. Type /stop to interrupt."
+                        "will discuss the same image. Type /stop-all to interrupt."
                     )
                 else:
                     print(
                         "[WORKING] Both models are inspecting the same image. "
-                        "Type /stop to interrupt."
+                        "Type /stop-all to interrupt."
                     )
                 active_task = asyncio.create_task(
                     broker.look(
@@ -4349,7 +4830,8 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                 running["active"] = True
                 print(
                     f"[WORKING] {command.target.title()} is executing your request "
-                    "now and may edit, test, commit, and push. Type /stop to interrupt."
+                    "now and may edit, test, commit, and push. "
+                    "Type /stop-all to interrupt."
                 )
                 active_task = asyncio.create_task(
                     (
@@ -4419,7 +4901,7 @@ async def run_console(broker: Broker, state: dict[str, Any]) -> None:
                     except CockpitError as exc:
                         print(f"[SYSTEM] {exc}")
             if not active_task:
-                print("george> ", end="", flush=True)
+                print("TYPE HERE> ", end="", flush=True)
     finally:
         input_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -4550,7 +5032,13 @@ async def async_main(args: argparse.Namespace) -> int:
     state["providers"] = list(providers)
     state.setdefault("guard_enabled", True)
     store.save()
-    continuity = ContinuityEngine(args.covenant, args.microhistory, args.journal)
+    memory_index = discover_canonical_memory_index()
+    continuity = ContinuityEngine(
+        args.covenant,
+        args.microhistory,
+        args.journal,
+        canonical_memory_path=memory_index,
+    )
     instructions = endpoint_instructions(continuity.covenant, continuity.microhistory)
 
     def remember_codex(thread_id: str) -> None:
@@ -4652,6 +5140,26 @@ async def async_main(args: argparse.Namespace) -> int:
             else:
                 print(f"{provider.title()} connected.", flush=True)
         relationship = RelationshipLedger(args.ledger)
+        history_exports = discover_history_exports()
+        if history_exports:
+            imported = bootstrap_relationship_history(
+                relationship,
+                history_exports,
+            )
+            episode_total = relationship.counts()["episodes"]
+            print(
+                "[CONTINUITY] "
+                f"{episode_total} relationship episode(s) available; "
+                f"{imported['inserted']} newly imported from "
+                f"{imported['messages']} archived message(s).",
+                flush=True,
+            )
+        if continuity.canonical is not None:
+            print(
+                "[CONTINUITY] Canonical memory connected read-only; "
+                f"{len(continuity.canonical.entries)} indexed topic file(s).",
+                flush=True,
+            )
         try:
             arena = ArenaManager(cwd, args.arena_root)
         except OperatingRoomError:

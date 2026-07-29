@@ -54,6 +54,13 @@ missions, and task-matched evidence episodes. An episode preserves its source
 exchange and counterevidence. Retrieval is bounded; the current request always
 outranks old evidence.
 
+At launch, Inception imports the latest local post-office message export
+idempotently and connects George's canonical memory index read-only when it is
+available. The index is searched first; only task-matched linked files are
+opened and only bounded excerpts enter model context. Direct operator input is
+learned once. Generated debate, critic, forwarding, and consensus prompts are
+recorded as internal traffic and cannot become operator corrections.
+
 ## Build isolation
 
 `ProofArena` creates detached Git worktrees from the same starting commit. Each

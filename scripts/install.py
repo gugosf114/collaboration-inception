@@ -143,6 +143,15 @@ def install(bin_dir: Path, skip_preflight: bool = False) -> list[Path]:
     bin_dir.mkdir(parents=True, exist_ok=True)
     launchers = {
         "inception": wrapper([python, str(PROJECT / "scripts" / "inception.py")]),
+        "launch": wrapper(
+            [
+                python,
+                str(PROJECT / "scripts" / "inception.py"),
+                "cockpit",
+                "--cwd",
+                str(PROJECT),
+            ]
+        ),
         "po": wrapper([bash, str(PROJECT / "postoffice" / "po")]),
         "searchchats": wrapper([bash, str(PROJECT / "postoffice" / "po")]),
         "search-chats": wrapper([bash, str(PROJECT / "postoffice" / "po")]),
@@ -173,10 +182,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print("Inception is installed.")
-    print(f"Launch: {args.bin_dir / 'inception'} cockpit")
-    print("Use any two signed-in models; Codex is optional.")
-    print("Inside the cockpit: /talk claude antigravity 2 YOUR QUESTION")
-    print(f"Chrome side panel: load unpacked extension from {PROJECT / 'extension'}")
+    print(f"Launch: {args.bin_dir / 'launch'}")
+    print(f"Advanced launch: {args.bin_dir / 'inception'} cockpit")
+    print("Default models: Claude, Codex, and Antigravity.")
+    print("Inside the cockpit: /review YOUR QUESTION or /ask-all YOUR QUESTION")
+    if "com.termux" in os.environ.get("PREFIX", ""):
+        print("The Termux cockpit works by itself.")
+    else:
+        print(f"Chrome side panel: load unpacked extension from {PROJECT / 'extension'}")
     if backups:
         print("Previous launchers were preserved:")
         for path in backups:

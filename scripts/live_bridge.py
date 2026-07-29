@@ -308,8 +308,9 @@ class LiveBridge:
         summary = detail.get("command") or detail.get("reason") or kind
         print(
             f"\n[APPROVAL {identifier}] {provider.title()} requests {summary}. "
-            f"Use /approve {identifier}, /approve-session {identifier}, "
-            f"or /deny {identifier}.",
+            f"Use /approve-once {identifier}, "
+            f"/approve-for-session {identifier}, "
+            f"or /deny-action {identifier}.",
             flush=True,
         )
         deadline = time.monotonic() + max(1.0, timeout)

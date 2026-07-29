@@ -60,6 +60,9 @@ class RelationshipLedgerTests(unittest.TestCase):
                 self.assertEqual(authority["category"], "testing")
                 self.assertGreater(authority["score"], 0.5)
                 self.assertGreater(ledger.drift("codex")["score"], 0)
+                counts = ledger.counts()
+                self.assertEqual(counts["outcomes"], 1)
+                self.assertEqual(counts["promises"], 1)
                 recorded = ledger.summary()["recent_outcomes"][0]
                 self.assertEqual(
                     recorded["recommendation"], "Ship the repaired build."
@@ -114,6 +117,28 @@ class RelationshipLedgerTests(unittest.TestCase):
                 rows = ledger.summary()["recent_corrections"]
                 self.assertEqual(rows[0]["confidence"], 1.0)
                 self.assertLess(rows[1]["confidence"], 1.0)
+            finally:
+                ledger.close()
+
+    def test_natural_correction_preserves_the_source_exchange_as_an_episode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = MODULE.RelationshipLedger(Path(directory) / "relationship.db")
+            try:
+                ledger.observe_operator(
+                    "You misunderstood the request. Do the reachable work.",
+                    ["codex"],
+                    prior_answers={"codex": "Run these commands yourself."},
+                    category="communication",
+                    session_id="turn-1",
+                )
+
+                self.assertEqual(ledger.counts()["episodes"], 1)
+                episode = ledger.summary()["recent_episodes"][0]
+                self.assertEqual(episode["agent"], "codex")
+                self.assertEqual(episode["category"], "communication")
+                self.assertIn("Do the reachable work", episode["inference"])
+                packet = ledger.packet_for("reachable communication work")
+                self.assertIn("EVIDENCE", packet)
             finally:
                 ledger.close()
 

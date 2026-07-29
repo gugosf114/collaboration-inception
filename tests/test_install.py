@@ -32,8 +32,17 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(backups, [])
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("supervised live multi-model cockpit", completed.stdout)
-            for name in ("inception", "po", "searchchats", "search-chats"):
+            for name in ("inception", "launch", "po", "searchchats", "search-chats"):
                 self.assertTrue((bin_dir / name).is_file())
+
+            launch_help = subprocess.run(
+                [str(bin_dir / "launch"), "--help"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(launch_help.returncode, 0, launch_help.stderr)
+            self.assertIn("George-controlled live multi-model", launch_help.stdout)
 
     @unittest.skipIf(os.name == "nt", "Unix launcher behavior")
     def test_preserves_an_existing_unrelated_launcher(self):

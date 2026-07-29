@@ -9,6 +9,7 @@ surface adapters on Termux, Linux, macOS, and native Windows PowerShell.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -318,7 +319,13 @@ class RelationshipLedger:
         return identifier
 
     def observe_operator(
-        self, text: str, recent_agents: Sequence[str] = ()
+        self,
+        text: str,
+        recent_agents: Sequence[str] = (),
+        *,
+        prior_answers: Mapping[str, str] | None = None,
+        category: str = "general",
+        session_id: str | None = None,
     ) -> list[str]:
         """Record natural corrections as provisional evidence, never as certainty."""
         matched = [pattern.search(text) for pattern in CORRECTION_PATTERNS]
@@ -338,6 +345,36 @@ class RelationshipLedger:
                     data={"source": "natural-language heuristic"},
                 )
             )
+            prior = (prior_answers or {}).get(agent or "", "")
+            if agent and prior:
+                source_hash = hashlib.sha256(
+                    (
+                        f"cockpit\0{session_id or ''}\0{agent}\0"
+                        f"{prior}\0{text}"
+                    ).encode("utf-8")
+                ).hexdigest()
+                self.record_episode(
+                    source="cockpit",
+                    session_id=session_id,
+                    ordinal=None,
+                    kind="correction",
+                    agent=agent,
+                    category=category,
+                    confidence=0.68,
+                    source_exchange={
+                        "assistant_before": compact(prior, 4_000),
+                        "george": compact(text, 4_000),
+                    },
+                    inference=(
+                        f"George corrected {agent}: {compact(text, 1_200)}"
+                    ),
+                    counterevidence="",
+                    useful_behavior=(
+                        "When a similar situation recurs, apply this correction: "
+                        f"{compact(text, 1_000)}"
+                    ),
+                    source_hash=source_hash,
+                )
         return identifiers
 
     def add_correction(self, agent: str, text: str) -> str:
@@ -922,6 +959,26 @@ class RelationshipLedger:
             "drift": {
                 agent: self.drift(agent) for agent in sorted(MODEL_PROVIDERS)
             },
+        }
+
+    def counts(self) -> dict[str, int]:
+        """Return inspectable row counts without exposing private record text."""
+        tables = (
+            "events",
+            "promises",
+            "outcomes",
+            "episodes",
+            "missions",
+            "skills",
+            "trajectories",
+        )
+        return {
+            table: int(
+                self.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+            )
+            for table in tables
         }
 
     @staticmethod

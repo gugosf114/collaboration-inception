@@ -27,3 +27,8 @@ runtime/review/
 runtime/relationship.sqlite3
 runtime/relationship.sqlite3-shm
 runtime/relationship.sqlite3-wal
+runtime/relationship.*.sqlite3
+
+# Generated phone guides, renders, and local verification logs.
+output/
+tmp/

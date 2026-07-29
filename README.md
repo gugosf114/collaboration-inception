@@ -50,7 +50,7 @@ Inception chooses quality over cost. It explicitly requests:
 - Claude Opus 4.8 with maximum effort
 - Gemini 3.1 Pro High
 
-The cockpit prints the exact active choices at startup and under `/status`.
+The cockpit prints the exact active choices at startup and under `/show-status`.
 These are deliberate pins, so another CLI's cheaper personal default cannot
 silently replace them. If Antigravity cannot provide Gemini 3.1 Pro High,
 Inception stops with a clear message instead of quietly using Flash.
@@ -81,11 +81,11 @@ git clone https://github.com/gugosf114/collaboration-inception.git
 cd collaboration-inception
 chmod +x install.sh
 ./install.sh
-inception cockpit
+launch
 ```
 
 On Termux, Claude may live inside Debian PRoot. The installer and cockpit
-detect that arrangement.
+detect that arrangement. After installation, daily use is simply `launch`.
 
 ## Add the Chrome side panel
 
@@ -107,30 +107,32 @@ remain active when the browser bridge is disabled.
 
 ## First real test
 
-At the `george>` prompt:
+At the `TYPE HERE>` prompt:
 
 ```text
-/status
-/talk 3 We need one reversible way to let two AI models modify the same project without silently overwriting each other. Challenge each proposal, name its failure mode, and finish with one testable design.
+/show-status
+/review We need one reversible way to let three AI models modify the same project without silently overwriting each other.
 ```
 
-The screen names both models. They first answer George independently. Then the
-cockpit passes their exact completed answers back and forth for the number of
-replies George granted. Each model knows which other model wrote the message.
-The exchange stops and returns control to George.
+The screen names all three models. They answer independently, read each other's
+answers, challenge them for two rounds, and Codex returns one cumulative answer.
+Choose the worker with `/fix-it codex`, `/fix-it claude`, or `/fix-it agy`.
+Type `/do-not-fix` to leave everything unchanged.
 
 Choose the pair when three models are installed:
 
 ```text
-/talk claude antigravity 3 YOUR QUESTION
-/talk codex antigravity 3 YOUR QUESTION
-/talk claude codex 3 YOUR QUESTION
+/talk-two claude agy YOUR QUESTION
+/talk-two codex agy YOUR QUESTION
+/talk-two claude codex YOUR QUESTION
 ```
 
 Use all three:
 
 ```text
-/council 2 YOUR QUESTION
+/ask-all YOUR QUESTION
+/debate-all YOUR QUESTION
+/review YOUR QUESTION
 ```
 
 ## Main controls
@@ -138,21 +140,21 @@ Use all three:
 ### Think and challenge
 
 ```text
-/both QUESTION                       default pair answers independently
-/all QUESTION                        every connected model answers independently
-/talk [MODEL MODEL] [1-6] QUESTION   bounded two-model dialogue
-/council [1-3] QUESTION              three-model challenge rounds
-/pass SOURCE TARGET [NOTE]           manually forward the last complete answer
-/last [MODEL]                        show a complete answer again
+/ask-all QUESTION                     all three answer independently
+/debate-all QUESTION                  all three challenge for two rounds
+/review QUESTION                      all three challenge; one answer; asks to fix
+/ask-two QUESTION                     Claude and Codex answer independently
+/talk-two MODEL MODEL QUESTION        the chosen two exchange two replies
+/ask-one MODEL QUESTION               only that model answers
+/show-last [MODEL]                    show a complete answer again
 ```
 
 ### Work with a checker
 
 ```text
-/claude REQUEST
-/codex REQUEST
-/antigravity REQUEST
-/act MODEL REQUEST
+/fix-it MODEL
+/do-not-fix
+/work-one MODEL REQUEST
 /guard on
 ```
 
@@ -165,17 +167,18 @@ read-only.
 ### See the same thing
 
 ```text
-/file "PATH" QUESTION
-/look "IMAGE" QUESTION
-/point "IMAGE" X Y QUESTION
-/screen QUESTION
+/show-file "PATH" QUESTION
+/show-image "IMAGE" QUESTION
+/point-to-image "IMAGE" X Y QUESTION
+/show-screen QUESTION
+/inspect-folder MODEL "FOLDER PATH" TASK
 /browser QUESTION
 /browser TAB :: QUESTION
 /browser-point "ELEMENT OR CSS" QUESTION
 /browser-point TAB :: ELEMENT :: QUESTION
 ```
 
-Both models receive the same private copy. `/screen` uses native Windows
+Both models receive the same private copy. `/show-screen` uses native Windows
 capture, Android/ADB where available, an existing Agent Bridge laptop, or a
 configured capture command. `/browser` uses Chrome's live debugging connection.
 Naming a tab removes ambiguity when several Chrome windows are open.
@@ -202,8 +205,9 @@ Do not put passwords in the bridge URL.
 ### Interrupt and steer
 
 ```text
-/steer [MODEL] GUIDANCE
-/stop
+/steer-all GUIDANCE
+/steer-one MODEL GUIDANCE
+/stop-all
 /listen
 ```
 
@@ -212,8 +216,8 @@ message. Antigravity currently has no equivalent same-turn steering interface,
 so Inception interrupts it and continues the same conversation with George's
 guidance. `/listen` turns speech into the next full cockpit command.
 
-The side panel applies the same rule automatically: speech becomes `/steer`
-while work is active and `/both` while the operator owns the room. **Point**
+The side panel applies the same rule automatically: speech steers active work
+and asks the default pair while the operator owns the room. **Point**
 captures the clicked page element's selector, text, ARIA label, role, bounds,
 nearby DOM, URL, and page title. **Stop** interrupts live work. **Hand back**
 returns control after human browser activity.
@@ -221,9 +225,9 @@ returns control after human browser activity.
 ### Approve consequential actions
 
 ```text
-/approve ID
-/approve-session ID
-/deny ID
+/approve-once ID
+/approve-for-session ID
+/deny-action ID
 ```
 
 Codex uses its native command and file-change approval requests. Claude and
@@ -255,6 +259,14 @@ the same small relevant packet. Every learned episode keeps its source
 exchange, confidence, useful future behavior, and counterevidence. Current
 instructions always outrank old evidence. `/recover` starts a fresh provider
 session while keeping the shared relationship record.
+
+On George's phone, launch automatically connects the read-only canonical
+memory index and imports the latest post-office `messages.jsonl` into the
+ledger. Only topic-matched canonical files are read for a turn. New direct
+corrections preserve the preceding model answer and George's correction as a
+source-backed episode. Council prompts and model criticism are marked internal
+so they cannot be mislearned as George's words. No memory command or pasted
+continuity prompt is required.
 
 Import an exported Codex archive without putting the archive into model
 context:

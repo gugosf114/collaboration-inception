@@ -1,5 +1,34 @@
 # Verification record
 
+## 2026-07-29 automatic continuity repair
+
+Automated verification:
+
+- Termux: 116 tests ran; 114 passed and 2 native-Windows installer tests
+  skipped.
+- Every Python source compiled, every JavaScript syntax check passed, the
+  extension manifest parsed, and `git diff --check` reported no errors.
+- Regression coverage proves that generated model criticism cannot become a
+  George correction, while a direct correction preserves the preceding answer
+  as a source-backed episode.
+- Canonical-memory tests prove topic matching, bounded retrieval, unrelated-file
+  exclusion, and YAML metadata removal.
+- History bootstrap imported 224 episodes from 3,052 archived messages; a
+  second import created zero new records and recognized all 224 duplicates.
+
+Real launch proof:
+
+- An isolated native-Termux launch connected Claude Opus 4.8, GPT-5.6 Sol, and
+  Gemini 3.1 Pro High through the actual cockpit startup path.
+- Startup reported 224 relationship episodes and a read-only canonical memory
+  index containing 54 topic files.
+- `/show-memory` reported the same 224 episodes and zero retained false
+  corrections.
+- `/show-sessions` showed that Antigravity's workspace conversation was
+  restored from its native cache.
+- The pre-repair live ledger was preserved as a private SQLite backup before
+  migration.
+
 ## 2026-07-28 capability-ceiling build
 
 Automated verification:
