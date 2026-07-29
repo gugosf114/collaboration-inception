@@ -1292,7 +1292,8 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         antigravity = FakeEndpoint("antigravity")
         broker = MODULE.Broker(codex, claude, antigravity=antigravity)
 
-        with redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with redirect_stdout(output):
             results = await broker.consensus("Choose the repair.", rounds=2)
 
         self.assertEqual(set(results), {"codex"})
@@ -1306,6 +1307,8 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Antigravity final council answer", final_prompt)
         self.assertIn("Choose who should fix it", final_prompt)
         self.assertEqual(broker.last_consensus, "codex answer")
+        self.assertIn("FINAL COMBINED ANSWER — CODEX", output.getvalue())
+        self.assertIn("codex answer", output.getvalue())
 
     async def test_council_criticism_is_not_learned_as_george_correction(self):
         class CombativeEndpoint(FakeEndpoint):

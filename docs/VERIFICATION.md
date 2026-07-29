@@ -11,6 +11,8 @@ Automated verification:
 - Regression coverage proves that generated model criticism cannot become a
   George correction, while a direct correction preserves the preceding answer
   as a source-backed episode.
+- `/review` regression coverage requires the synthesis to print once beneath
+  an unmistakable `FINAL COMBINED ANSWER — CODEX` banner.
 - Canonical-memory tests prove topic matching, bounded retrieval, unrelated-file
   exclusion, and YAML metadata removal.
 - History bootstrap imported 224 episodes from 3,052 archived messages; a

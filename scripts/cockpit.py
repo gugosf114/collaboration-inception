@@ -2933,11 +2933,26 @@ class Broker:
             ),
             mode="discussion",
             attachments=attachments,
+            visible=False,
             learn=False,
         )
         final = result.get(scribe)
         if final and final.text:
             self.last_consensus = final.text
+            border = "=" * 72
+            print(f"\n{border}")
+            print(f"FINAL COMBINED ANSWER — {scribe.upper()}")
+            print(border)
+            print(final.text.strip())
+            print(border, flush=True)
+            if self.live is not None:
+                self.live.publish(
+                    "consensus.final",
+                    {
+                        "agent": scribe,
+                        "text": final.text,
+                    },
+                )
         return result
 
     async def guarded_ask(
