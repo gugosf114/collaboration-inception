@@ -24,9 +24,15 @@ jobs:
           node-version: "22"
       - name: Compile scripts
         run: python -m compileall -q scripts postoffice
-      - name: Check browser bridges
+      - name: Check browser and side-panel JavaScript
         run: |
           node --check scripts/capture_browser.cjs
           node --check scripts/point_browser.cjs
+          node --check scripts/review_sidepanel.cjs
+          node --check scripts/review_extension_live.cjs
+          node --check extension/background.js
+          node --check extension/activity.js
+          node --check extension/sidepanel.js
+          node -e "JSON.parse(require('fs').readFileSync('extension/manifest.json', 'utf8'))"
       - name: Run tests
         run: python -m unittest discover -s tests -v

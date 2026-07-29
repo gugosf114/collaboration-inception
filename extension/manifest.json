@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Inception Cockpit",
+  "version": "1.0.0",
+  "description": "George-controlled live Claude, Codex, and Antigravity collaboration beside the real browser.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Inception"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["activity.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

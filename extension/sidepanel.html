@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Inception Cockpit</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">COLLABORATION INCEPTION</p>
+          <h1>Operating room</h1>
+        </div>
+        <div id="connectionPill" class="pill pill-offline" role="status">
+          <span class="status-dot"></span>
+          <span id="connectionText">Offline</span>
+        </div>
+      </header>
+
+      <section id="pairingCard" class="card pairing-card">
+        <p class="section-label">ONE-TIME PAIRING</p>
+        <h2>Connect this panel</h2>
+        <p class="muted">Start <code>inception cockpit</code>, then enter the six-digit code printed in the terminal.</p>
+        <form id="pairingForm" class="pairing-form">
+          <label for="bridgeUrl">Local bridge</label>
+          <input id="bridgeUrl" name="bridgeUrl" type="url" value="http://127.0.0.1:8765" spellcheck="false" required>
+          <label for="pairingCode">Pairing code</label>
+          <div class="inline">
+            <input id="pairingCode" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="000000" required>
+            <button class="button button-primary" type="submit">Connect</button>
+          </div>
+          <p id="pairingError" class="error" role="alert"></p>
+        </form>
+      </section>
+
+      <div id="cockpit" hidden>
+        <section class="state-strip" aria-label="Current cockpit state">
+          <div class="state-cell">
+            <span class="state-label">TURN</span>
+            <strong id="turnState">Ready</strong>
+          </div>
+          <div class="state-cell">
+            <span class="state-label">CONTROL</span>
+            <strong id="controlOwner">George</strong>
+          </div>
+          <button id="handbackButton" class="button button-quiet" type="button">Hand back</button>
+        </section>
+
+        <section class="card transcript-card">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">LIVE THREAD</p>
+              <h2>What is happening</h2>
+            </div>
+            <button id="clearButton" class="text-button" type="button">Clear view</button>
+          </div>
+          <div id="emptyState" class="empty-state">
+            <span class="empty-mark">◎</span>
+            <p>The models’ replies, active work, steering, and blockers appear here.</p>
+          </div>
+          <ol id="eventStream" class="event-stream" aria-live="polite"></ol>
+        </section>
+
+        <section id="approvalCard" class="card approval-card" hidden>
+          <div class="approval-banner">
+            <span class="approval-icon">!</span>
+            <div>
+              <p class="section-label">YOUR DECISION</p>
+              <h2 id="approvalTitle">Consequential action</h2>
+            </div>
+          </div>
+          <pre id="approvalDetail"></pre>
+          <div class="approval-actions">
+            <button id="denyButton" class="button button-danger" type="button">Deny</button>
+            <button id="approveOnceButton" class="button button-secondary" type="button">Allow once</button>
+            <button id="approveSessionButton" class="button button-primary" type="button">Allow for session</button>
+          </div>
+        </section>
+
+        <section class="composer">
+          <label for="prompt">Speak or type to the room</label>
+          <textarea id="prompt" rows="4" placeholder="Tell the models what outcome you need. Shift+Enter adds a line."></textarea>
+          <div class="composer-tools">
+            <button id="voiceButton" class="icon-button" type="button" aria-pressed="false" title="Dictate">
+              <span aria-hidden="true">●</span>
+              <span>Voice</span>
+            </button>
+            <button id="pointButton" class="icon-button" type="button" title="Point to a page element">
+              <span aria-hidden="true">⌖</span>
+              <span>Point</span>
+            </button>
+            <button id="stopButton" class="icon-button stop-button" type="button" title="Stop active work">
+              <span aria-hidden="true">■</span>
+              <span>Stop</span>
+            </button>
+          </div>
+          <div class="send-grid">
+            <button class="button button-primary send-command" data-prefix="/both" type="button">Ask both</button>
+            <button class="button button-secondary send-command" data-prefix="/talk 3" type="button">Let them challenge</button>
+            <button class="button button-agent send-command" data-prefix="/codex" type="button">Codex works</button>
+            <button class="button button-agent send-command" data-prefix="/claude" type="button">Claude works</button>
+          </div>
+          <details class="more-controls">
+            <summary>More controls</summary>
+            <div class="control-grid">
+              <button class="text-button send-command" data-prefix="/all" type="button">Ask all</button>
+              <button class="text-button send-command" data-prefix="/antigravity" type="button">Antigravity works</button>
+              <button class="text-button send-command" data-prefix="/council 2" type="button">Three-model council</button>
+              <button class="text-button send-command" data-prefix="/arena" type="button">Competing builds</button>
+            </div>
+          </details>
+          <p id="composerError" class="error" role="alert"></p>
+        </section>
+      </div>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

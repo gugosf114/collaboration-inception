@@ -22,6 +22,8 @@ runtime/cockpit.lock
 runtime/attachments/
 runtime/surfaces/
 runtime/arena/
+runtime/bridge/
+runtime/review/
 runtime/relationship.sqlite3
 runtime/relationship.sqlite3-shm
 runtime/relationship.sqlite3-wal
