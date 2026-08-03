@@ -270,6 +270,44 @@ Run it once.
                 sleeper=lambda _seconds: None,
             )
 
+    def test_exchange_allows_the_tui_to_settle_before_injection(self):
+        session = TERMUX_SEND.CodexSession(pid=200, tty_index=2)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as stream:
+            stream.write(
+                '{"type":"event_msg","payload":{"type":"task_complete"}}\n'
+            )
+            stream.flush()
+            rollout = Path(stream.name)
+            with mock.patch.object(
+                TERMUX_SEND, "rollout_paths", return_value=[rollout]
+            ), mock.patch.object(
+                TERMUX_SEND, "wait_until_idle"
+            ) as wait_idle, mock.patch.object(
+                TERMUX_SEND.time, "sleep"
+            ) as sleep, mock.patch.object(
+                TERMUX_SEND, "rollout_is_busy", return_value=False
+            ), mock.patch.object(
+                TERMUX_SEND, "send_message", return_value=100
+            ) as send, mock.patch.object(
+                TERMUX_SEND,
+                "wait_for_reply_turn",
+                return_value=("reply", "turn-1"),
+            ):
+                result = TERMUX_SEND.exchange_with_session(
+                    session,
+                    "message",
+                    source_tty=1,
+                    task_id="PO_20260803T120000_A1B2C3",
+                    phase="send",
+                    visible=False,
+                    reply_timeout=1,
+                    idle_timeout=1,
+                )
+            wait_idle.assert_called_once_with(rollout, 1)
+            sleep.assert_called_once_with(TERMUX_SEND.POST_IDLE_SETTLE)
+            send.assert_called_once()
+            self.assertEqual(result, ("reply", "turn-1", rollout, 100))
+
     def test_generic_send_has_a_unique_task_marker_and_waits_by_default(self):
         envelope = TERMUX_SEND.message_envelope(
             "Check the build",
