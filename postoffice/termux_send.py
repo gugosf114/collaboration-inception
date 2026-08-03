@@ -18,10 +18,12 @@ import re
 import secrets
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 
 SYS_PIDFD_OPEN = 434
@@ -44,10 +46,130 @@ DEFAULT_LOCK_DIR = Path("/data/data/com.termux/files/home/postoffice") / "locks"
 DEFAULT_TITLE_REGISTRY = (
     Path("/data/data/com.termux/files/home/postoffice") / "session-titles.json"
 )
+AGENT_BRIDGE_MCP_URL = "http://127.0.0.1:8080/mcp"
+AGENT_BRIDGE_MCP_TOKEN = "agentbridge-mcp"
+AGENT_BRIDGE_TIMEOUT = 10.0
+TERMUX_SESSION_NUMBER_ENV = (
+    "SHELL_CMD__APP_TERMINAL_SESSION_NUMBER_SINCE_APP_START"
+)
 
 
 class SendError(RuntimeError):
     pass
+
+
+def _decode_mcp_json(payload: bytes) -> dict[str, Any]:
+    text = payload.decode("utf-8", "replace").strip()
+    if not text:
+        return {}
+    if text.startswith("data:") or text.startswith("event:"):
+        data_lines = [
+            line.removeprefix("data:").lstrip()
+            for line in text.splitlines()
+            if line.startswith("data:")
+        ]
+        text = "\n".join(data_lines).strip()
+    try:
+        result = json.loads(text)
+    except ValueError as exc:
+        raise SendError("Agent Bridge returned malformed MCP JSON") from exc
+    if result is None:
+        return {}
+    if not isinstance(result, dict):
+        raise SendError("Agent Bridge returned a non-object MCP response")
+    return result
+
+
+class AgentBridgeMCP:
+    """Small session-scoped client for George's on-device accessibility bridge."""
+
+    def __init__(
+        self,
+        url: str = AGENT_BRIDGE_MCP_URL,
+        token: str = AGENT_BRIDGE_MCP_TOKEN,
+        timeout: float = AGENT_BRIDGE_TIMEOUT,
+    ) -> None:
+        self.url = url
+        self.token = token
+        self.timeout = timeout
+        self.session_id: str | None = None
+
+    def _post(self, payload: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {self.token}",
+        }
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read()
+                response_headers = response.headers
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise SendError(f"Agent Bridge MCP is unavailable: {exc}") from exc
+        decoded = _decode_mcp_json(body)
+        if decoded.get("error"):
+            raise SendError(f"Agent Bridge MCP error: {decoded['error']}")
+        return decoded, response_headers
+
+    def initialize(self) -> None:
+        response, headers = self._post(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "post-office-termux-title",
+                        "version": "1",
+                    },
+                },
+            }
+        )
+        session_id = headers.get("mcp-session-id")
+        if not session_id:
+            raise SendError("Agent Bridge MCP did not return a session id")
+        if "result" not in response:
+            raise SendError("Agent Bridge MCP initialization did not complete")
+        self.session_id = session_id
+        self._post(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }
+        )
+
+    def call(self, tool: str, arguments: dict[str, Any] | None = None) -> str:
+        if self.session_id is None:
+            self.initialize()
+        response, _headers = self._post(
+            {
+                "jsonrpc": "2.0",
+                "id": secrets.randbelow(2**31 - 1) + 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments or {}},
+            }
+        )
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise SendError(f"Agent Bridge tool {tool!r} returned no result")
+        text = "\n".join(
+            block.get("text", "")
+            for block in result.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+        if result.get("isError"):
+            raise SendError(f"Agent Bridge tool {tool!r} failed: {text.strip()}")
+        return text
 
 
 @dataclass(frozen=True)
@@ -89,7 +211,7 @@ def load_title_registry(path: Path = DEFAULT_TITLE_REGISTRY) -> dict[str, dict]:
         raise SendError(f"Cannot read session-title registry {path}: {exc}") from exc
     if (
         not isinstance(data, dict)
-        or data.get("schema_version") != 1
+        or data.get("schema_version") != 2
         or not isinstance(data.get("titles"), dict)
     ):
         raise SendError(f"Invalid session-title registry: {path}")
@@ -102,6 +224,7 @@ def load_title_registry(path: Path = DEFAULT_TITLE_REGISTRY) -> dict[str, dict]:
             or key != record["title"].casefold()
             or type(record.get("pid")) is not int
             or type(record.get("tty_index")) is not int
+            or record.get("native_name_verified") is not True
             or (
                 record.get("termux_session") is not None
                 and not isinstance(record.get("termux_session"), str)
@@ -122,7 +245,7 @@ def save_title_registry(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            {"schema_version": 1, "titles": titles},
+            {"schema_version": 2, "titles": titles},
             indent=2,
             ensure_ascii=False,
         ) + "\n"
@@ -142,21 +265,230 @@ def save_title_registry(
                 pass
 
 
-def write_terminal_title(session: CodexSession, title: str) -> None:
-    payload = f"\x1b]0;{title}\x07".encode("utf-8")
+def _screen_nodes(screen: str) -> list[dict[str, str]]:
+    nodes: list[dict[str, str]] = []
+    window = ""
+    for line in screen.splitlines():
+        if line.startswith("--- window:"):
+            window = line
+            continue
+        columns = line.split("\t")
+        if len(columns) != 7 or not columns[0].startswith("node_"):
+            continue
+        nodes.append(
+            {
+                "node_id": columns[0],
+                "class": columns[1],
+                "text": columns[2],
+                "description": columns[3],
+                "resource_id": columns[4],
+                "bounds": columns[5],
+                "flags": columns[6],
+                "window": window,
+            }
+        )
+    return nodes
+
+
+def active_termux_session_numbers() -> set[int]:
+    numbers: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if _stdin_tty(pid) is None:
+            continue
+        raw_number = _read_environ(pid).get(TERMUX_SESSION_NUMBER_ENV)
+        if raw_number is None:
+            continue
+        try:
+            numbers.add(int(raw_number))
+        except ValueError:
+            continue
+    return numbers
+
+
+def termux_session_position(
+    session: CodexSession,
+    session_numbers: Sequence[int] | None = None,
+) -> int:
+    if session.termux_session is None:
+        raise SendError("The current Termux session has no creation number")
     try:
-        descriptor = os.open(session.tty_path, os.O_WRONLY | os.O_NOCTTY)
-        sent = 0
-        while sent < len(payload):
-            written = os.write(descriptor, payload[sent:])
-            if written <= 0:
-                raise OSError("terminal title write returned zero bytes")
-            sent += written
-    except OSError as exc:
-        raise SendError(f"Cannot set title on {session.tty_path}: {exc}") from exc
+        current_number = int(session.termux_session)
+    except ValueError as exc:
+        raise SendError(
+            f"Invalid Termux session creation number: {session.termux_session!r}"
+        ) from exc
+    numbers = sorted(
+        set(session_numbers)
+        if session_numbers is not None
+        else active_termux_session_numbers()
+    )
+    if current_number not in numbers:
+        raise SendError(
+            f"Current Termux session {current_number} is missing from the live drawer"
+        )
+    return numbers.index(current_number) + 1
+
+
+def _screen_state(client: AgentBridgeMCP) -> str:
+    return client.call("android_get_screen_state", {})
+
+
+def _focused_application_package(screen: str) -> str | None:
+    match = re.search(
+        r"^--- window:.*\btype:APPLICATION\s+pkg:([^\s]+).*\bfocused:true\s+---$",
+        screen,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else None
+
+
+def _drawer_session_node(screen: str, position: int) -> dict[str, str] | None:
+    prefix = f"[{position}] "
+    for node in _screen_nodes(screen):
+        if (
+            node["resource_id"] == "com.termux:id/session_title"
+            and node["text"].startswith(prefix)
+        ):
+            return node
+    return None
+
+
+def _dialog_node(
+    screen: str,
+    *,
+    class_name: str | None = None,
+    text: str | None = None,
+) -> dict[str, str] | None:
+    for node in _screen_nodes(screen):
+        if "title:Set session name" not in node["window"]:
+            continue
+        if class_name is not None and node["class"] != class_name:
+            continue
+        if text is not None and node["text"] != text:
+            continue
+        return node
+    return None
+
+
+def _restore_termux_terminal(client: AgentBridgeMCP, screen: str) -> None:
+    current = screen
+    for _attempt in range(3):
+        if (
+            "title:Set session name" not in current
+            and "type:INPUT_METHOD" not in current
+            and "com.termux:id/left_drawer" not in current
+        ):
+            return
+        client.call("android_press_back", {})
+        current = _screen_state(client)
+
+
+def rename_termux_app_session(
+    session: CodexSession,
+    title: str,
+    *,
+    client: AgentBridgeMCP | None = None,
+    session_numbers: Sequence[int] | None = None,
+) -> None:
+    """Rename Termux's app-owned bold session label through its real UI."""
+
+    position = termux_session_position(session, session_numbers)
+    bridge = client or AgentBridgeMCP()
+    screen = _screen_state(bridge)
+    original_package = _focused_application_package(screen)
+    if original_package != "com.termux":
+        bridge.call("android_open_app", {"package_id": "com.termux"})
+        bridge.call("android_wait_for_idle", {"timeout": 3000})
+        screen = _screen_state(bridge)
+        if _focused_application_package(screen) != "com.termux":
+            raise SendError("Agent Bridge could not bring Termux to the foreground")
+
+    final_screen = screen
+    try:
+        if "com.termux:id/left_drawer" not in screen:
+            size_match = re.search(r"^screen:(\d+)x(\d+)", screen, re.MULTILINE)
+            if size_match is None:
+                raise SendError("Agent Bridge did not report the phone screen size")
+            width, height = map(int, size_match.groups())
+            bridge.call(
+                "android_swipe",
+                {
+                    "x1": max(2, width // 100),
+                    "y1": height * 2 // 5,
+                    "x2": width * 4 // 5,
+                    "y2": height * 2 // 5,
+                    "duration": 350,
+                },
+            )
+            bridge.call("android_wait_for_idle", {"timeout": 3000})
+            screen = _screen_state(bridge)
+            final_screen = screen
+
+        for attempt in range(2):
+            session_node = _drawer_session_node(screen, position)
+            if session_node is None:
+                raise SendError(
+                    f"Termux drawer row [{position}] for {session.tty_path} was not found"
+                )
+            try:
+                bridge.call(
+                    "android_long_click_node", {"node_id": session_node["node_id"]}
+                )
+                break
+            except SendError:
+                if attempt == 1:
+                    raise
+                screen = _screen_state(bridge)
+                final_screen = screen
+        bridge.call(
+            "android_wait_for_node",
+            {"by": "text", "value": "Set session name", "timeout": 3000},
+        )
+        screen = _screen_state(bridge)
+        final_screen = screen
+        edit = _dialog_node(screen, class_name="EditText")
+        if edit is None:
+            raise SendError("Termux session-name field was not found")
+        bridge.call("android_type_clear_text", {"node_id": edit["node_id"]})
+        bridge.call(
+            "android_type_append_text",
+            {
+                "node_id": edit["node_id"],
+                "text": title,
+                "typing_speed": 10,
+                "typing_speed_variance": 0,
+            },
+        )
+        screen = _screen_state(bridge)
+        final_screen = screen
+        confirm = _dialog_node(screen, text="SET")
+        if confirm is None:
+            raise SendError("Termux session-name SET button was not found")
+        bridge.call("android_click_node", {"node_id": confirm["node_id"]})
+        bridge.call("android_wait_for_idle", {"timeout": 3000})
+        final_screen = _screen_state(bridge)
+        renamed = _drawer_session_node(final_screen, position)
+        expected = f"[{position}] {title}"
+        if renamed is None or not (
+            renamed["text"] == expected
+            or renamed["text"].startswith(expected + " ")
+        ):
+            raise SendError(
+                f"Termux did not display the new bold session name {title!r}"
+            )
     finally:
-        if "descriptor" in locals():
-            os.close(descriptor)
+        try:
+            _restore_termux_terminal(bridge, final_screen)
+        except SendError:
+            pass
+        if original_package and original_package != "com.termux":
+            try:
+                bridge.call("android_open_app", {"package_id": original_package})
+            except SendError:
+                pass
 
 
 @contextmanager
@@ -203,7 +535,7 @@ def register_session_title(
     sessions: Sequence[CodexSession],
     *,
     registry_path: Path = DEFAULT_TITLE_REGISTRY,
-    title_writer=write_terminal_title,
+    session_renamer=rename_termux_app_session,
 ) -> str:
     title = validate_session_title(title)
     with title_registry_lock(registry_path):
@@ -230,9 +562,10 @@ def register_session_title(
             "tty_index": session.tty_index,
             "termux_session": session.termux_session,
             "start_time_ticks": session.start_time_ticks,
+            "native_name_verified": True,
             "registered_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        title_writer(session, title)
+        session_renamer(session, title)
         save_title_registry(titles, registry_path)
     return title
 
@@ -1283,7 +1616,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{len(matches)} live Codex sessions"
                 )
             title = register_session_title(matches[0], args.set_title, sessions)
-            print(f"title={title!r} tty={matches[0].tty_path}")
+            print(
+                f"session-name={title!r} verified=true tty={matches[0].tty_path}"
+            )
             return 0
         if args.list:
             current = current_ancestor_tty()

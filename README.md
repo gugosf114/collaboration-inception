@@ -87,12 +87,14 @@ launch
 On Termux, Claude may live inside Debian PRoot. The installer and cockpit
 detect that arrangement. After installation, daily use is simply `launch`.
 
-Each new raw Termux Codex session starts with the ordinary `home` title. After
-George's first substantive request, that session runs `po title "LinkedIn
-Applications"`, using a short description of its actual work. Cross-session
-messages use that exact visible title. Missing, differently capitalized, and
-stale titles are rejected instead of guessed. Side branches do not rename the
-session; only a real change in its primary work does.
+Each new raw Termux Codex session initially shows the terminal's secondary
+`home` title and has no bold app-owned name. After George's first substantive
+request, that session runs `po title "LinkedIn Applications"`, using a short
+description of its actual work. The command drives Termux's native rename
+dialog through the phone-local Agent Bridge, reads the exact bold drawer name
+back, and only then registers it for routing. Missing, differently capitalized,
+and stale names are rejected instead of guessed. Side branches do not rename
+the session; only a real change in its primary work does.
 
 ## Add the Chrome side panel
 
@@ -303,10 +305,14 @@ po send --steer-now pts/2 "This deliberately changes your active task."
 po crosscheck pts/2 /tmp/primary-answer.txt "Was the original request satisfied?"
 ```
 
-`po title` changes the current Termux tab's visible name and registers the same
-exact name for routing. Before any send, `po` prints the resolved destination
-title and terminal. If that exact title is missing or belongs to a dead session,
-the send stops.
+`po title` changes the current Termux tab's bold native session name and
+independently reads that drawer row back before registering the same exact name
+for routing. It can briefly bring Termux forward to perform the native rename,
+then restores the app that was previously visible. If the rename cannot be
+verified, the routing registry is left unchanged. Before any name-routed send,
+`po` prints the resolved destination name and terminal. If that exact name is
+missing or belongs to a dead session, the send stops. PTY and PID selectors
+remain explicit recovery routes.
 
 The Termux-only sender visibly types each message and presses Enter by default,
 so George can watch the handoff in the receiving session. `--instant` keeps the

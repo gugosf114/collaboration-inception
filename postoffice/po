@@ -12,7 +12,7 @@
 #   po listeners                 show registered AI listeners
 #   po blast <message...>        type one message into registered listeners
 #   po sessions                  list live raw Termux Codex sessions
-#   po title <work name...>      name this Codex session from its actual work
+#   po title <work name...>      set this tab's native Termux session name
 #   po send <title|pts/N> MSG    visibly type into one raw Termux Codex session
 #   po send-other MSG            visibly type an attributed cross-session message
 #   po crosscheck <title|pts/N> <primary-file> <objective...>

@@ -71,7 +71,7 @@ class TermuxSendTests(unittest.TestCase):
                 "LinkedIn Applications",
                 [session],
                 registry_path=registry,
-                title_writer=lambda target, title: writes.append((target, title)),
+                session_renamer=lambda target, title: writes.append((target, title)),
             )
             self.assertEqual(registered, "LinkedIn Applications")
             self.assertEqual(
@@ -96,7 +96,7 @@ class TermuxSendTests(unittest.TestCase):
                 "Security Training",
                 [session],
                 registry_path=registry,
-                title_writer=lambda target, title: writes.append((target, title)),
+                session_renamer=lambda target, title: writes.append((target, title)),
             )
             titles = TERMUX_SEND.load_title_registry(registry)
             self.assertEqual(list(titles), ["security training"])
@@ -119,7 +119,7 @@ class TermuxSendTests(unittest.TestCase):
                 "LinkedIn Applications",
                 [first, second],
                 registry_path=registry,
-                title_writer=lambda _target, _title: None,
+                session_renamer=lambda _target, _title: None,
             )
             with self.assertRaisesRegex(TERMUX_SEND.SendError, "already belongs"):
                 TERMUX_SEND.register_session_title(
@@ -127,7 +127,7 @@ class TermuxSendTests(unittest.TestCase):
                     "LINKEDIN APPLICATIONS",
                     [first, second],
                     registry_path=registry,
-                    title_writer=lambda _target, _title: None,
+                    session_renamer=lambda _target, _title: None,
                 )
             with self.assertRaisesRegex(TERMUX_SEND.SendError, "stale"):
                 TERMUX_SEND.resolve_session_title(
@@ -154,7 +154,7 @@ class TermuxSendTests(unittest.TestCase):
                 "LinkedIn Applications",
                 [original],
                 registry_path=registry,
-                title_writer=lambda _target, _title: None,
+                session_renamer=lambda _target, _title: None,
             )
             with self.assertRaisesRegex(TERMUX_SEND.SendError, "stale"):
                 TERMUX_SEND.resolve_session_title(
@@ -169,7 +169,7 @@ class TermuxSendTests(unittest.TestCase):
             registry = Path(directory) / "titles.json"
             for malformed in (
                 "[]\n",
-                '{"schema_version": 1, "titles": {"bad": null}}\n',
+                '{"schema_version": 2, "titles": {"bad": null}}\n',
             ):
                 registry.write_text(malformed, encoding="utf-8")
                 with self.assertRaisesRegex(TERMUX_SEND.SendError, "Invalid"):
@@ -201,7 +201,7 @@ class TermuxSendTests(unittest.TestCase):
                         "LinkedIn Applications",
                         sessions,
                         registry_path=registry,
-                        title_writer=first_writer,
+                        session_renamer=first_writer,
                     )
                 )
             except Exception as exc:  # pragma: no cover - failure is asserted below
@@ -216,7 +216,7 @@ class TermuxSendTests(unittest.TestCase):
                         "LinkedIn Applications",
                         sessions,
                         registry_path=registry,
-                        title_writer=lambda _target, _title: None,
+                        session_renamer=lambda _target, _title: None,
                     )
                 )
             except TERMUX_SEND.SendError as exc:
@@ -262,23 +262,126 @@ class TermuxSendTests(unittest.TestCase):
         )
         self.assertEqual(
             output.getvalue(),
-            "title='LinkedIn Applications' tty=/dev/pts/7\n",
+            "session-name='LinkedIn Applications' verified=true tty=/dev/pts/7\n",
         )
 
-    @unittest.skipUnless(os.name == "posix", "terminal-title test requires a PTY")
-    def test_terminal_title_is_written_to_a_real_disposable_pty(self):
-        import pty
+    def test_mcp_notification_null_response_is_accepted(self):
+        self.assertEqual(TERMUX_SEND._decode_mcp_json(b"null"), {})
 
-        master, slave = pty.openpty()
-        try:
-            index = TERMUX_SEND.tty_index(os.ttyname(slave))
-            session = TERMUX_SEND.CodexSession(pid=os.getpid(), tty_index=index)
-            TERMUX_SEND.write_terminal_title(session, "LinkedIn Applications")
-            expected = b"\x1b]0;LinkedIn Applications\x07"
-            self.assertEqual(os.read(master, len(expected)), expected)
-        finally:
-            os.close(master)
-            os.close(slave)
+    def test_termux_session_position_uses_creation_order(self):
+        session = TERMUX_SEND.CodexSession(
+            pid=100, tty_index=7, termux_session="46"
+        )
+        self.assertEqual(
+            TERMUX_SEND.termux_session_position(session, [47, 41, 46]), 2
+        )
+
+    def test_real_termux_name_is_set_and_read_back_through_the_drawer(self):
+        normal = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_terminal\tView\t-\t-\tcom.termux:id/terminal_view\t0,0,1080,2200\ton,ena
+"""
+        drawer = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,2200\ton,ena
+node_first\tTextView\t[1] home\t-\tcom.termux:id/session_title\t0,200,700,400\ton,lclk,ena
+node_second\tTextView\t[2] home\t-\tcom.termux:id/session_title\t0,400,700,600\ton,lclk,ena
+node_third\tTextView\t[3] home\t-\tcom.termux:id/session_title\t0,600,700,800\ton,lclk,ena
+"""
+        dialog = """screen:1080x2520
+--- window:2 type:APPLICATION pkg:com.termux title:Set session name layer:0 focused:true ---
+node_edit\tEditText\thome\t-\t-\t100,700,900,850\ton,edt,ena
+node_cancel\tButton\tCANCEL\t-\tandroid:id/button2\t600,900,780,1020\ton,clk,ena
+node_set_old\tButton\tSET\t-\tandroid:id/button1\t780,900,980,1020\ton,clk,ena
+"""
+        typed_dialog = dialog.replace("node_set_old", "node_set_new").replace(
+            "\tEditText\thome\t", "\tEditText\tLinkedIn Applications\t"
+        )
+        renamed = """screen:1080x2520
+--- window:3 type:INPUT_METHOD pkg:keyboard title:Keyboard layer:1 focused:false ---
+node_keyboard\tView\t-\t-\t-\t0,1500,1080,2520\ton,ena
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer2\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,1400\ton,ena
+node_second_done\tTextView\t[2] LinkedIn Applications home\t-\tcom.termux:id/session_title\t0,400,700,600\ton,lclk,ena
+"""
+        clean_drawer = renamed.replace(
+            "--- window:3 type:INPUT_METHOD pkg:keyboard title:Keyboard layer:1 focused:false ---\n"
+            "node_keyboard\tView\t-\t-\t-\t0,1500,1080,2520\ton,ena\n",
+            "",
+        )
+
+        class FakeBridge:
+            def __init__(self):
+                self.screens = iter(
+                    [
+                        normal,
+                        drawer,
+                        dialog,
+                        typed_dialog,
+                        renamed,
+                        clean_drawer,
+                        normal,
+                    ]
+                )
+                self.calls = []
+
+            def call(self, tool, arguments=None):
+                self.calls.append((tool, arguments or {}))
+                if tool == "android_get_screen_state":
+                    return next(self.screens)
+                return "ok"
+
+        bridge = FakeBridge()
+        session = TERMUX_SEND.CodexSession(
+            pid=100, tty_index=7, termux_session="46"
+        )
+        TERMUX_SEND.rename_termux_app_session(
+            session,
+            "LinkedIn Applications",
+            client=bridge,
+            session_numbers=[41, 46, 47],
+        )
+        self.assertIn(
+            (
+                "android_long_click_node",
+                {"node_id": "node_second"},
+            ),
+            bridge.calls,
+        )
+        self.assertIn(
+            ("android_click_node", {"node_id": "node_set_new"}), bridge.calls
+        )
+        self.assertEqual(
+            [tool for tool, _arguments in bridge.calls].count("android_press_back"),
+            2,
+        )
+
+    def test_native_rename_failure_does_not_create_a_registry_record(self):
+        session = TERMUX_SEND.CodexSession(pid=100, tty_index=1)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+
+            def fail(_session, _title):
+                raise TERMUX_SEND.SendError("native rename failed")
+
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "native rename failed"):
+                TERMUX_SEND.register_session_title(
+                    session,
+                    "LinkedIn Applications",
+                    [session],
+                    registry_path=registry,
+                    session_renamer=fail,
+                )
+            self.assertFalse(registry.exists())
+
+    def test_legacy_osc_registry_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            registry.write_text(
+                '{"schema_version": 1, "titles": {}}\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "Invalid"):
+                TERMUX_SEND.load_title_registry(registry)
 
     def test_rejects_multiline_and_control_input(self):
         self.assertEqual(TERMUX_SEND.validate_message("plain words"), b"plain words")
