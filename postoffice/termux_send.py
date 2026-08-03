@@ -41,6 +41,9 @@ DEFAULT_CROSSCHECK_DIR = (
     Path("/data/data/com.termux/files/home/postoffice") / "crosschecks"
 )
 DEFAULT_LOCK_DIR = Path("/data/data/com.termux/files/home/postoffice") / "locks"
+DEFAULT_TITLE_REGISTRY = (
+    Path("/data/data/com.termux/files/home/postoffice") / "session-titles.json"
+)
 
 
 class SendError(RuntimeError):
@@ -52,10 +55,216 @@ class CodexSession:
     pid: int
     tty_index: int
     termux_session: str | None = None
+    start_time_ticks: int | None = None
 
     @property
     def tty_path(self) -> str:
         return f"/dev/pts/{self.tty_index}"
+
+
+def validate_session_title(value: str) -> str:
+    title = value.strip()
+    if not title:
+        raise SendError("Session title is empty")
+    if len(title) > 80:
+        raise SendError("Session title exceeds 80 characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in title):
+        raise SendError("Session title contains a control character")
+    if (
+        title.startswith("-")
+        or title.casefold() == "other"
+        or title.casefold().startswith("pid:")
+        or re.fullmatch(r"(?:/dev/)?pts/\d+", title, re.IGNORECASE) is not None
+    ):
+        raise SendError(f"Session title {title!r} is reserved for routing")
+    return title
+
+
+def load_title_registry(path: Path = DEFAULT_TITLE_REGISTRY) -> dict[str, dict]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SendError(f"Cannot read session-title registry {path}: {exc}") from exc
+    if (
+        not isinstance(data, dict)
+        or data.get("schema_version") != 1
+        or not isinstance(data.get("titles"), dict)
+    ):
+        raise SendError(f"Invalid session-title registry: {path}")
+    titles = data["titles"]
+    for key, record in titles.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(record, dict)
+            or not isinstance(record.get("title"), str)
+            or key != record["title"].casefold()
+            or type(record.get("pid")) is not int
+            or type(record.get("tty_index")) is not int
+            or (
+                record.get("termux_session") is not None
+                and not isinstance(record.get("termux_session"), str)
+            )
+            or (
+                record.get("start_time_ticks") is not None
+                and type(record.get("start_time_ticks")) is not int
+            )
+        ):
+            raise SendError(f"Invalid session-title registry record in {path}")
+    return titles
+
+
+def save_title_registry(
+    titles: dict[str, dict], path: Path = DEFAULT_TITLE_REGISTRY
+) -> None:
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(
+            {"schema_version": 1, "titles": titles},
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n"
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        )
+        temporary.write_text(payload, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise SendError(f"Cannot write session-title registry {path}: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def write_terminal_title(session: CodexSession, title: str) -> None:
+    payload = f"\x1b]0;{title}\x07".encode("utf-8")
+    try:
+        descriptor = os.open(session.tty_path, os.O_WRONLY | os.O_NOCTTY)
+        sent = 0
+        while sent < len(payload):
+            written = os.write(descriptor, payload[sent:])
+            if written <= 0:
+                raise OSError("terminal title write returned zero bytes")
+            sent += written
+    except OSError as exc:
+        raise SendError(f"Cannot set title on {session.tty_path}: {exc}") from exc
+    finally:
+        if "descriptor" in locals():
+            os.close(descriptor)
+
+
+@contextmanager
+def title_registry_lock(path: Path = DEFAULT_TITLE_REGISTRY):
+    import fcntl
+
+    lock_path = path.with_name(f".{path.name}.lock")
+    handle = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+", encoding="utf-8")
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError as exc:
+        if handle is not None:
+            handle.close()
+        raise SendError(f"Cannot lock session-title registry {path}: {exc}") from exc
+    try:
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _record_is_live(
+    record: dict, sessions: Sequence[CodexSession]
+) -> CodexSession | None:
+    matches = [
+        session
+        for session in sessions
+        if session.pid == record.get("pid")
+        and session.tty_index == record.get("tty_index")
+        and session.termux_session == record.get("termux_session")
+        and session.start_time_ticks == record.get("start_time_ticks")
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def register_session_title(
+    session: CodexSession,
+    title: str,
+    sessions: Sequence[CodexSession],
+    *,
+    registry_path: Path = DEFAULT_TITLE_REGISTRY,
+    title_writer=write_terminal_title,
+) -> str:
+    title = validate_session_title(title)
+    with title_registry_lock(registry_path):
+        key = title.casefold()
+        titles = load_title_registry(registry_path)
+        existing = titles.get(key)
+        if existing is not None:
+            owner = _record_is_live(existing, sessions)
+            if owner is not None and owner != session:
+                raise SendError(
+                    f"Session title {title!r} already belongs to {owner.tty_path}"
+                )
+        titles = {
+            name: record
+            for name, record in titles.items()
+            if not (
+                record.get("pid") == session.pid
+                and record.get("tty_index") == session.tty_index
+            )
+        }
+        titles[key] = {
+            "title": title,
+            "pid": session.pid,
+            "tty_index": session.tty_index,
+            "termux_session": session.termux_session,
+            "start_time_ticks": session.start_time_ticks,
+            "registered_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        title_writer(session, title)
+        save_title_registry(titles, registry_path)
+    return title
+
+
+def session_title(
+    session: CodexSession,
+    *,
+    registry_path: Path = DEFAULT_TITLE_REGISTRY,
+) -> str | None:
+    for record in load_title_registry(registry_path).values():
+        if _record_is_live(record, [session]) is not None:
+            title = record.get("title")
+            return title if isinstance(title, str) else None
+    return None
+
+
+def resolve_session_title(
+    title: str,
+    sessions: Sequence[CodexSession],
+    *,
+    registry_path: Path = DEFAULT_TITLE_REGISTRY,
+) -> CodexSession:
+    title = validate_session_title(title)
+    record = load_title_registry(registry_path).get(title.casefold())
+    if record is None or record.get("title") != title:
+        raise SendError(f"No session is titled {title!r}")
+    session = _record_is_live(record, sessions)
+    if session is None:
+        raise SendError(
+            f"Session title {title!r} is stale; name that live session again"
+        )
+    return session
 
 
 def tty_index(value: str) -> int:
@@ -88,6 +297,21 @@ def _read_environ(pid: int) -> dict[str, str]:
     return result
 
 
+def _process_start_time_ticks(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return None
+    marker = stat.rfind(") ")
+    if marker < 0:
+        return None
+    fields_after_command = stat[marker + 2 :].split()
+    try:
+        return int(fields_after_command[19])
+    except (IndexError, ValueError):
+        return None
+
+
 def _stdin_tty(pid: int) -> int | None:
     try:
         target = os.readlink(f"/proc/{pid}/fd/0")
@@ -116,6 +340,7 @@ def codex_sessions() -> list[CodexSession]:
                 termux_session=env.get(
                     "SHELL_CMD__APP_TERMINAL_SESSION_NUMBER_SINCE_APP_START"
                 ),
+                start_time_ticks=_process_start_time_ticks(pid),
             )
         )
     return sorted(sessions, key=lambda item: item.tty_index)
@@ -145,7 +370,12 @@ def current_ancestor_tty() -> int | None:
     return None
 
 
-def select_session(selector: str, sessions: Sequence[CodexSession]) -> CodexSession:
+def select_session(
+    selector: str,
+    sessions: Sequence[CodexSession],
+    *,
+    registry_path: Path = DEFAULT_TITLE_REGISTRY,
+) -> CodexSession:
     if selector == "other":
         current = current_ancestor_tty()
         if current is None:
@@ -158,7 +388,12 @@ def select_session(selector: str, sessions: Sequence[CodexSession]) -> CodexSess
             raise SendError(f"Invalid Codex PID selector: {selector!r}") from exc
         matches = [item for item in sessions if item.pid == wanted_pid]
     else:
-        wanted_tty = tty_index(selector)
+        try:
+            wanted_tty = tty_index(selector)
+        except SendError:
+            return resolve_session_title(
+                selector, sessions, registry_path=registry_path
+            )
         matches = [item for item in sessions if item.tty_index == wanted_tty]
     if len(matches) != 1:
         found = ", ".join(item.tty_path for item in matches) or "none"
@@ -956,6 +1191,11 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--list", action="store_true", help="list raw Codex sessions")
     result.add_argument(
+        "--set-title",
+        metavar="TITLE",
+        help="name the calling raw Termux Codex session",
+    )
+    result.add_argument(
         "--self-test", action="store_true", help="test delivery on a disposable PTY"
     )
     visibility = result.add_mutually_exclusive_group()
@@ -1015,7 +1255,11 @@ def parser() -> argparse.ArgumentParser:
         default=REPLY_TIMEOUT,
         help="seconds to wait for each reply",
     )
-    result.add_argument("target", nargs="?", help="other, pts/N, /dev/pts/N, or pid:PID")
+    result.add_argument(
+        "target",
+        nargs="?",
+        help="exact session title, other, pts/N, /dev/pts/N, or pid:PID",
+    )
     result.add_argument("message", nargs="?", help="one submitted Codex message")
     return result
 
@@ -1028,6 +1272,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"PTY delivery passed: {token}")
             return 0
         sessions = codex_sessions()
+        if args.set_title is not None:
+            current = current_ancestor_tty()
+            if current is None:
+                raise SendError("Could not identify the calling Codex terminal")
+            matches = [session for session in sessions if session.tty_index == current]
+            if len(matches) != 1:
+                raise SendError(
+                    f"Calling terminal /dev/pts/{current} matched "
+                    f"{len(matches)} live Codex sessions"
+                )
+            title = register_session_title(matches[0], args.set_title, sessions)
+            print(f"title={title!r} tty={matches[0].tty_path}")
+            return 0
         if args.list:
             current = current_ancestor_tty()
             if not sessions:
@@ -1035,14 +1292,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             for session in sessions:
                 marker = "*" if session.tty_index == current else " "
                 termux_number = session.termux_session or "?"
+                title = session_title(session)
+                title_text = repr(title) if title is not None else "unassigned"
                 print(
                     f"{marker} {session.tty_path}  codex-pid={session.pid}  "
-                    f"termux-session={termux_number}"
+                    f"termux-session={termux_number}  title={title_text}"
                 )
             return 0
         if not args.target or args.message is None:
             raise SendError(
-                "Usage: po send <pts/N|pid:PID> <message> or "
+                "Usage: po send <title|pts/N|pid:PID> <message> or "
                 "po send-other <message>"
             )
         if args.idle_timeout <= 0 or args.reply_timeout <= 0:
@@ -1054,6 +1313,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         reject_self_target(session, source)
         if not args.wait_idle and not args.no_wait:
             raise SendError("--steer-now requires --no-wait")
+        destination_title = session_title(session)
+        destination = (
+            repr(destination_title)
+            if destination_title is not None
+            else session.tty_path
+        )
+        print(
+            f"destination={destination} tty={session.tty_path}",
+            f"codex-pid={session.pid}",
+            flush=True,
+        )
         if args.cross_check:
             if args.no_wait:
                 raise SendError("Cross-check cannot be combined with --no-wait")
@@ -1150,7 +1420,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         return 0
     except SendError as exc:
-        print(f"po send stopped: {exc}", file=sys.stderr)
+        command = "po title" if args.set_title is not None else "po send"
+        print(f"{command} stopped: {exc}", file=sys.stderr)
         return 1
 
 

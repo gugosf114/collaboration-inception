@@ -88,10 +88,10 @@ On Termux, Claude may live inside Debian PRoot. The installer and cockpit
 detect that arrangement. After installation, daily use is simply `launch`.
 
 Each new raw Termux Codex session starts with the ordinary `home` title. After
-George's first substantive request, that session sets its built-in terminal
-title to a short description of the actual work, such as `LinkedIn
-Applications`. Cross-session messages name that exact visible title before
-sending, so George can catch a wrong recipient. Side branches do not rename the
+George's first substantive request, that session runs `po title "LinkedIn
+Applications"`, using a short description of its actual work. Cross-session
+messages use that exact visible title. Missing, differently capitalized, and
+stale titles are rejected instead of guessed. Side branches do not rename the
 session; only a real change in its primary work does.
 
 ## Add the Chrome side panel
@@ -294,12 +294,19 @@ the only other Codex, or name its terminal:
 
 ```sh
 po sessions
+po title "LinkedIn Applications"
+po send "LinkedIn Applications" "Reply with the evidence behind your verdict."
 po send-other "Check whether my fix covers the original failure."
 po send pts/2 "Reply with the evidence behind your current verdict."
 po send --instant pts/2 "Send this as one fast block instead."
 po send --steer-now pts/2 "This deliberately changes your active task."
 po crosscheck pts/2 /tmp/primary-answer.txt "Was the original request satisfied?"
 ```
+
+`po title` changes the current Termux tab's visible name and registers the same
+exact name for routing. Before any send, `po` prints the resolved destination
+title and terminal. If that exact title is missing or belongs to a dead session,
+the send stops.
 
 The Termux-only sender visibly types each message and presses Enter by default,
 so George can watch the handoff in the receiving session. `--instant` keeps the

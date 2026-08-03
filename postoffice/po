@@ -12,9 +12,10 @@
 #   po listeners                 show registered AI listeners
 #   po blast <message...>        type one message into registered listeners
 #   po sessions                  list live raw Termux Codex sessions
-#   po send <pts/N> <message...> visibly type into one raw Termux Codex session
+#   po title <work name...>      name this Codex session from its actual work
+#   po send <title|pts/N> MSG    visibly type into one raw Termux Codex session
 #   po send-other MSG            visibly type an attributed cross-session message
-#   po crosscheck <pts/N> <primary-file> <objective...>
+#   po crosscheck <title|pts/N> <primary-file> <objective...>
 #                                blind answer + one challenge; save the record
 # Works from Termux native AND from inside proot (absolute paths only).
 # ============================================================================
@@ -212,6 +213,14 @@ blast)
 sessions)
   exec python3 "$SCRIPT_DIR/termux_send.py" --list
   ;;
+title)
+  title="$*"
+  if [ -z "$title" ]; then
+    echo "usage: po title <work name>"
+    exit 1
+  fi
+  exec python3 "$SCRIPT_DIR/termux_send.py" --set-title "$title"
+  ;;
 send)
   options=()
   while :; do
@@ -227,7 +236,7 @@ send)
   target="${1:-}"; shift || true
   msg="$*"
   if [ -z "$target" ] || [ -z "$msg" ]; then
-    echo "usage: po send <pts/N|pid:PID> <message>"
+    echo "usage: po send <title|pts/N|pid:PID> <message>"
     exit 1
   fi
   exec python3 "$SCRIPT_DIR/termux_send.py" "${options[@]}" -- "$target" "$msg"
@@ -264,7 +273,7 @@ crosscheck)
   primary_file="${1:-}"; shift || true
   objective="$*"
   if [ -z "$target" ] || [ -z "$primary_file" ] || [ -z "$objective" ]; then
-    echo "usage: po crosscheck [--instant] <pts/N|pid:PID> <primary-file> <objective>"
+    echo "usage: po crosscheck [--instant] <title|pts/N|pid:PID> <primary-file> <objective>"
     exit 1
   fi
   exec python3 "$SCRIPT_DIR/termux_send.py" \

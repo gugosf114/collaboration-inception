@@ -4,6 +4,7 @@ import io
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -38,6 +39,246 @@ class TermuxSendTests(unittest.TestCase):
         self.assertEqual(TERMUX_SEND.tty_index("/dev/pts/17"), 17)
         with self.assertRaises(TERMUX_SEND.SendError):
             TERMUX_SEND.tty_index("2")
+
+    def test_validates_session_titles(self):
+        self.assertEqual(
+            TERMUX_SEND.validate_session_title("  LinkedIn Applications  "),
+            "LinkedIn Applications",
+        )
+        for title in (
+            "",
+            "   ",
+            "bad\nname",
+            "x" * 81,
+            "other",
+            "pid:123",
+            "pts/2",
+            "/dev/pts/2",
+            "--instant",
+        ):
+            with self.assertRaises(TERMUX_SEND.SendError):
+                TERMUX_SEND.validate_session_title(title)
+
+    def test_registers_resolves_and_replaces_an_exact_live_title(self):
+        session = TERMUX_SEND.CodexSession(
+            pid=100, tty_index=1, termux_session="termux-1"
+        )
+        writes = []
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            registered = TERMUX_SEND.register_session_title(
+                session,
+                "LinkedIn Applications",
+                [session],
+                registry_path=registry,
+                title_writer=lambda target, title: writes.append((target, title)),
+            )
+            self.assertEqual(registered, "LinkedIn Applications")
+            self.assertEqual(
+                TERMUX_SEND.resolve_session_title(
+                    "LinkedIn Applications", [session], registry_path=registry
+                ),
+                session,
+            )
+            self.assertEqual(
+                TERMUX_SEND.select_session(
+                    "LinkedIn Applications", [session], registry_path=registry
+                ),
+                session,
+            )
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "No session"):
+                TERMUX_SEND.resolve_session_title(
+                    "linkedin applications", [session], registry_path=registry
+                )
+
+            TERMUX_SEND.register_session_title(
+                session,
+                "Security Training",
+                [session],
+                registry_path=registry,
+                title_writer=lambda target, title: writes.append((target, title)),
+            )
+            titles = TERMUX_SEND.load_title_registry(registry)
+            self.assertEqual(list(titles), ["security training"])
+            self.assertEqual(titles["security training"]["title"], "Security Training")
+        self.assertEqual(
+            writes,
+            [
+                (session, "LinkedIn Applications"),
+                (session, "Security Training"),
+            ],
+        )
+
+    def test_refuses_duplicate_live_and_stale_session_titles(self):
+        first = TERMUX_SEND.CodexSession(pid=100, tty_index=1)
+        second = TERMUX_SEND.CodexSession(pid=200, tty_index=2)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            TERMUX_SEND.register_session_title(
+                first,
+                "LinkedIn Applications",
+                [first, second],
+                registry_path=registry,
+                title_writer=lambda _target, _title: None,
+            )
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "already belongs"):
+                TERMUX_SEND.register_session_title(
+                    second,
+                    "LINKEDIN APPLICATIONS",
+                    [first, second],
+                    registry_path=registry,
+                    title_writer=lambda _target, _title: None,
+                )
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "stale"):
+                TERMUX_SEND.resolve_session_title(
+                    "LinkedIn Applications", [], registry_path=registry
+                )
+
+    def test_recycled_pid_and_tty_do_not_inherit_a_stale_title(self):
+        original = TERMUX_SEND.CodexSession(
+            pid=100,
+            tty_index=1,
+            termux_session="termux-1",
+            start_time_ticks=111,
+        )
+        recycled = TERMUX_SEND.CodexSession(
+            pid=100,
+            tty_index=1,
+            termux_session="termux-1",
+            start_time_ticks=222,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            TERMUX_SEND.register_session_title(
+                original,
+                "LinkedIn Applications",
+                [original],
+                registry_path=registry,
+                title_writer=lambda _target, _title: None,
+            )
+            with self.assertRaisesRegex(TERMUX_SEND.SendError, "stale"):
+                TERMUX_SEND.resolve_session_title(
+                    "LinkedIn Applications", [recycled], registry_path=registry
+                )
+            self.assertIsNone(
+                TERMUX_SEND.session_title(recycled, registry_path=registry)
+            )
+
+    def test_malformed_title_registry_fails_with_a_send_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            for malformed in (
+                "[]\n",
+                '{"schema_version": 1, "titles": {"bad": null}}\n',
+            ):
+                registry.write_text(malformed, encoding="utf-8")
+                with self.assertRaisesRegex(TERMUX_SEND.SendError, "Invalid"):
+                    TERMUX_SEND.load_title_registry(registry)
+
+    def test_competing_title_registrations_are_serialized(self):
+        first_session = TERMUX_SEND.CodexSession(
+            pid=100, tty_index=1, start_time_ticks=111
+        )
+        second_session = TERMUX_SEND.CodexSession(
+            pid=200, tty_index=2, start_time_ticks=222
+        )
+        sessions = [first_session, second_session]
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        successes = []
+        failures = []
+
+        def first_writer(_target, _title):
+            first_entered.set()
+            release_first.wait(1)
+
+        def first_registration():
+            try:
+                successes.append(
+                    TERMUX_SEND.register_session_title(
+                        first_session,
+                        "LinkedIn Applications",
+                        sessions,
+                        registry_path=registry,
+                        title_writer=first_writer,
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - failure is asserted below
+                failures.append(exc)
+
+        def second_registration():
+            second_started.set()
+            try:
+                successes.append(
+                    TERMUX_SEND.register_session_title(
+                        second_session,
+                        "LinkedIn Applications",
+                        sessions,
+                        registry_path=registry,
+                        title_writer=lambda _target, _title: None,
+                    )
+                )
+            except TERMUX_SEND.SendError as exc:
+                failures.append(exc)
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "titles.json"
+            first = threading.Thread(target=first_registration)
+            second = threading.Thread(target=second_registration)
+            first.start()
+            self.assertTrue(first_entered.wait(1))
+            second.start()
+            self.assertTrue(second_started.wait(1))
+            second.join(0.05)
+            self.assertTrue(second.is_alive())
+            release_first.set()
+            first.join(1)
+            second.join(1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(successes, ["LinkedIn Applications"])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("already belongs", str(failures[0]))
+
+    def test_set_title_cli_registers_the_calling_session(self):
+        session = TERMUX_SEND.CodexSession(pid=100, tty_index=7)
+        with mock.patch.object(
+            TERMUX_SEND, "codex_sessions", return_value=[session]
+        ), mock.patch.object(
+            TERMUX_SEND, "current_ancestor_tty", return_value=7
+        ), mock.patch.object(
+            TERMUX_SEND,
+            "register_session_title",
+            return_value="LinkedIn Applications",
+        ) as register, contextlib.redirect_stdout(io.StringIO()) as output:
+            result = TERMUX_SEND.main(
+                ["--set-title", "LinkedIn Applications"]
+            )
+        self.assertEqual(result, 0)
+        register.assert_called_once_with(
+            session, "LinkedIn Applications", [session]
+        )
+        self.assertEqual(
+            output.getvalue(),
+            "title='LinkedIn Applications' tty=/dev/pts/7\n",
+        )
+
+    @unittest.skipUnless(os.name == "posix", "terminal-title test requires a PTY")
+    def test_terminal_title_is_written_to_a_real_disposable_pty(self):
+        import pty
+
+        master, slave = pty.openpty()
+        try:
+            index = TERMUX_SEND.tty_index(os.ttyname(slave))
+            session = TERMUX_SEND.CodexSession(pid=os.getpid(), tty_index=index)
+            TERMUX_SEND.write_terminal_title(session, "LinkedIn Applications")
+            expected = b"\x1b]0;LinkedIn Applications\x07"
+            self.assertEqual(os.read(master, len(expected)), expected)
+        finally:
+            os.close(master)
+            os.close(slave)
 
     def test_rejects_multiline_and_control_input(self):
         self.assertEqual(TERMUX_SEND.validate_message("plain words"), b"plain words")
