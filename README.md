@@ -87,6 +87,13 @@ launch
 On Termux, Claude may live inside Debian PRoot. The installer and cockpit
 detect that arrangement. After installation, daily use is simply `launch`.
 
+Each new raw Termux Codex session starts with the ordinary `home` title. After
+George's first substantive request, that session sets its built-in terminal
+title to a short description of the actual work, such as `LinkedIn
+Applications`. Cross-session messages name that exact visible title before
+sending, so George can catch a wrong recipient. Side branches do not rename the
+session; only a real change in its primary work does.
+
 ## Add the Chrome side panel
 
 The terminal cockpit works by itself. The side panel adds the live channel,
