@@ -120,6 +120,7 @@ def install(bin_dir: Path, skip_preflight: bool = False) -> list[Path]:
         PROJECT / "scripts" / "capture_browser.cjs",
         PROJECT / "scripts" / "point_browser.cjs",
         PROJECT / "postoffice" / "po",
+        PROJECT / "postoffice" / "termux_send.py",
         PROJECT / "context" / "WORKING_COVENANT.md",
         PROJECT / "context" / "MICROHISTORY_V1.md",
         PROJECT / "extension" / "manifest.json",

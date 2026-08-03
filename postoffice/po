@@ -11,9 +11,15 @@
 #   po register [name]           register THIS tmux pane as an AI listener
 #   po listeners                 show registered AI listeners
 #   po blast <message...>        type one message into registered listeners
+#   po sessions                  list live raw Termux Codex sessions
+#   po send <pts/N> <message...> type into one raw Termux Codex session
+#   po send-other --visible MSG  visibly type an attributed cross-session message
+#   po crosscheck <pts/N> <primary-file> <objective...>
+#                                blind answer + one challenge; save the record
 # Works from Termux native AND from inside proot (absolute paths only).
 # ============================================================================
 set -u
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PO=/data/data/com.termux/files/home/postoffice
 mkdir -p "$PO"
 TREES=()
@@ -202,6 +208,68 @@ blast)
     tmux send-keys -t "$p" Enter
     echo "sent → $p"
   done
+  ;;
+sessions)
+  exec python3 "$SCRIPT_DIR/termux_send.py" --list
+  ;;
+send)
+  options=()
+  while :; do
+    case "${1:-}" in
+      --visible|--no-wait|--wait-idle|--steer-now)
+        options+=("$1"); shift ;;
+      --idle-timeout|--reply-timeout)
+        [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
+        options+=("$1" "$2"); shift 2 ;;
+      *) break ;;
+    esac
+  done
+  target="${1:-}"; shift || true
+  msg="$*"
+  if [ -z "$target" ] || [ -z "$msg" ]; then
+    echo "usage: po send <pts/N|pid:PID> <message>"
+    exit 1
+  fi
+  exec python3 "$SCRIPT_DIR/termux_send.py" "${options[@]}" -- "$target" "$msg"
+  ;;
+send-other)
+  options=()
+  while :; do
+    case "${1:-}" in
+      --visible|--no-wait|--wait-idle|--steer-now)
+        options+=("$1"); shift ;;
+      --idle-timeout|--reply-timeout)
+        [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
+        options+=("$1" "$2"); shift 2 ;;
+      *) break ;;
+    esac
+  done
+  msg="$*"
+  [ -z "$msg" ] && { echo "usage: po send-other [--visible] <message>"; exit 1; }
+  exec python3 "$SCRIPT_DIR/termux_send.py" "${options[@]}" -- other "$msg"
+  ;;
+crosscheck)
+  options=()
+  while :; do
+    case "${1:-}" in
+      --visible)
+        options+=("$1"); shift ;;
+      --idle-timeout|--reply-timeout)
+        [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
+        options+=("$1" "$2"); shift 2 ;;
+      *) break ;;
+    esac
+  done
+  target="${1:-}"; shift || true
+  primary_file="${1:-}"; shift || true
+  objective="$*"
+  if [ -z "$target" ] || [ -z "$primary_file" ] || [ -z "$objective" ]; then
+    echo "usage: po crosscheck [--visible] <pts/N|pid:PID> <primary-file> <objective>"
+    exit 1
+  fi
+  exec python3 "$SCRIPT_DIR/termux_send.py" \
+    --cross-check --primary-file "$primary_file" "${options[@]}" \
+    -- "$target" "$objective"
   ;;
 help|-h|--help)
   grep '^#   po ' "$0" | sed 's/^# *//'

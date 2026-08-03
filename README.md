@@ -280,6 +280,36 @@ python3 scripts/ingest_history.py PATH_TO_MESSAGES_JSONL
 corrections, interruptions, approvals, and successes as fallible evidence;
 re-running it is idempotent.
 
+### Message another raw Termux Codex session
+
+Raw Termux sessions do not need to be restarted inside tmux. List them, send to
+the only other Codex, or name its terminal:
+
+```sh
+po sessions
+po send-other "Check whether my fix covers the original failure."
+po send pts/2 "Reply with the evidence behind your current verdict."
+po send --steer-now pts/2 "This deliberately changes your active task."
+po crosscheck pts/2 /tmp/primary-answer.txt "Was the original request satisfied?"
+```
+
+The Termux-only sender queues behind the target's active turn by default,
+locks each target so two senders cannot interleave, assigns every message a
+task ID, and accepts only the matching Codex turn's completion. It duplicates
+the terminal master's existing file
+descriptor and writes through the same input path as the phone keyboard. It
+verifies the PTY again immediately before sending and rejects multiline or
+control-character input. `--steer-now` is the explicit override for changing
+an active target turn. `po blast` remains the route for registered tmux panes.
+
+`po crosscheck` turns the pipe into a bounded two-Codex review. It waits for
+the target to become idle, assigns a task ID, asks for a blind independent
+answer before revealing or journaling the primary answer, permits one final
+challenge, validates the required disagreement sections, and saves both
+replies plus hashes and unresolved disagreement under
+`~/postoffice/crosschecks/`. The sending Codex remains responsible for the
+final result.
+
 ### Isolated build arena
 
 ```text
