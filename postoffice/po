@@ -12,8 +12,8 @@
 #   po listeners                 show registered AI listeners
 #   po blast <message...>        type one message into registered listeners
 #   po sessions                  list live raw Termux Codex sessions
-#   po send <pts/N> <message...> type into one raw Termux Codex session
-#   po send-other --visible MSG  visibly type an attributed cross-session message
+#   po send <pts/N> <message...> visibly type into one raw Termux Codex session
+#   po send-other MSG            visibly type an attributed cross-session message
 #   po crosscheck <pts/N> <primary-file> <objective...>
 #                                blind answer + one challenge; save the record
 # Works from Termux native AND from inside proot (absolute paths only).
@@ -216,7 +216,7 @@ send)
   options=()
   while :; do
     case "${1:-}" in
-      --visible|--no-wait|--wait-idle|--steer-now)
+      --visible|--instant|--no-wait|--wait-idle|--steer-now)
         options+=("$1"); shift ;;
       --idle-timeout|--reply-timeout)
         [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
@@ -236,7 +236,7 @@ send-other)
   options=()
   while :; do
     case "${1:-}" in
-      --visible|--no-wait|--wait-idle|--steer-now)
+      --visible|--instant|--no-wait|--wait-idle|--steer-now)
         options+=("$1"); shift ;;
       --idle-timeout|--reply-timeout)
         [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
@@ -245,14 +245,14 @@ send-other)
     esac
   done
   msg="$*"
-  [ -z "$msg" ] && { echo "usage: po send-other [--visible] <message>"; exit 1; }
+  [ -z "$msg" ] && { echo "usage: po send-other [--instant] <message>"; exit 1; }
   exec python3 "$SCRIPT_DIR/termux_send.py" "${options[@]}" -- other "$msg"
   ;;
 crosscheck)
   options=()
   while :; do
     case "${1:-}" in
-      --visible)
+      --visible|--instant)
         options+=("$1"); shift ;;
       --idle-timeout|--reply-timeout)
         [ -n "${2:-}" ] || { echo "missing value for $1"; exit 1; }
@@ -264,7 +264,7 @@ crosscheck)
   primary_file="${1:-}"; shift || true
   objective="$*"
   if [ -z "$target" ] || [ -z "$primary_file" ] || [ -z "$objective" ]; then
-    echo "usage: po crosscheck [--visible] <pts/N|pid:PID> <primary-file> <objective>"
+    echo "usage: po crosscheck [--instant] <pts/N|pid:PID> <primary-file> <objective>"
     exit 1
   fi
   exec python3 "$SCRIPT_DIR/termux_send.py" \

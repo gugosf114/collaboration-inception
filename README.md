@@ -289,11 +289,15 @@ the only other Codex, or name its terminal:
 po sessions
 po send-other "Check whether my fix covers the original failure."
 po send pts/2 "Reply with the evidence behind your current verdict."
+po send --instant pts/2 "Send this as one fast block instead."
 po send --steer-now pts/2 "This deliberately changes your active task."
 po crosscheck pts/2 /tmp/primary-answer.txt "Was the original request satisfied?"
 ```
 
-The Termux-only sender queues behind the target's active turn by default,
+The Termux-only sender visibly types each message and presses Enter by default,
+so George can watch the handoff in the receiving session. `--instant` keeps the
+same delivery and reply tracking but injects the message as one fast block. The
+sender queues behind the target's active turn by default,
 locks each target so two senders cannot interleave, assigns every message a
 task ID, and accepts only the matching Codex turn's completion. It duplicates
 the terminal master's existing file

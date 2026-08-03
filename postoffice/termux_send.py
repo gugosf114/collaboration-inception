@@ -925,10 +925,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--self-test", action="store_true", help="test delivery on a disposable PTY"
     )
-    result.add_argument(
+    visibility = result.add_mutually_exclusive_group()
+    visibility.add_argument(
         "--visible",
+        dest="visible",
         action="store_true",
-        help="type at readable speed and append the sending conversation",
+        help="type at readable speed (the default)",
+    )
+    visibility.add_argument(
+        "--instant",
+        dest="visible",
+        action="store_false",
+        help="inject the whole prompt at once instead of visibly typing it",
     )
     result.add_argument(
         "--no-wait", action="store_true", help="submit without printing the reply"
@@ -945,7 +953,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_false",
         help="explicitly inject into the current active target turn",
     )
-    result.set_defaults(wait_idle=True)
+    result.set_defaults(wait_idle=True, visible=True)
     result.add_argument(
         "--cross-check",
         action="store_true",

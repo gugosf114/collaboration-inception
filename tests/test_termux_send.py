@@ -24,6 +24,14 @@ TERMUX_SEND = load("termux_send", ROOT / "postoffice" / "termux_send.py")
 
 
 class TermuxSendTests(unittest.TestCase):
+    def test_cli_visibly_types_by_default_and_instant_is_explicit(self):
+        visible = TERMUX_SEND.parser().parse_args(["pts/2", "hello"])
+        instant = TERMUX_SEND.parser().parse_args(
+            ["--instant", "pts/2", "hello"]
+        )
+        self.assertTrue(visible.visible)
+        self.assertFalse(instant.visible)
+
     def test_parses_supported_tty_names(self):
         self.assertEqual(TERMUX_SEND.tty_index("pts/2"), 2)
         self.assertEqual(TERMUX_SEND.tty_index("/dev/pts/17"), 17)
