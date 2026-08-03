@@ -29,6 +29,7 @@ SYS_PIDFD_GETFD = 438
 TIOCGPTN = 0x80045430
 MAX_MESSAGE_BYTES = 16 * 1024
 VISIBLE_CHAR_DELAY = 0.04
+REPLY_CHAR_DELAY = 0.01
 SUBMIT_DELAY = 0.35
 POST_IDLE_SETTLE = 1.0
 REPLY_TIMEOUT = 900
@@ -625,6 +626,38 @@ def transmit_prompt(
     return sent
 
 
+def render_returned_reply(
+    session: CodexSession,
+    reply: str,
+    *,
+    task_id: str,
+    turn_id: str,
+    phase: str = "reply",
+    visible: bool = True,
+    char_delay: float = REPLY_CHAR_DELAY,
+    stream=None,
+    sleeper=time.sleep,
+) -> None:
+    """Show a captured peer answer as a visible typed-back receipt."""
+    stream = stream or sys.stdout
+    peer = session.tty_path.removeprefix("/dev/")
+    stream.write(f"\n{peer} is typing back ({phase})...\n")
+    stream.flush()
+    if visible:
+        for character in reply:
+            stream.write(character)
+            stream.flush()
+            sleeper(char_delay)
+    else:
+        stream.write(reply)
+    if not reply.endswith("\n"):
+        stream.write("\n")
+    stream.write(
+        f"[received: task={task_id} turn={turn_id} from={peer} phase={phase}]\n"
+    )
+    stream.flush()
+
+
 def send_message(
     session: CodexSession,
     message: str,
@@ -1047,10 +1080,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             independent = record["rounds"][0]["reply"]
             challenge = record["rounds"][1]["reply"]
+            render_returned_reply(
+                session,
+                independent,
+                task_id=task_id,
+                turn_id=record["rounds"][0]["turn_id"],
+                phase="independent answer",
+                visible=args.visible,
+            )
+            render_returned_reply(
+                session,
+                challenge,
+                task_id=task_id,
+                turn_id=record["rounds"][1]["turn_id"],
+                phase="final challenge",
+                visible=args.visible,
+            )
             print(f"cross-check complete: {record['task_id']}")
             print(f"record: {path}")
-            print(f"\nindependent reply <- {session.tty_path}\n{independent}")
-            print(f"\nfinal challenge <- {session.tty_path}\n{challenge}")
             return 0
         task_id = new_task_id("PO")
         print(f"task={task_id}", flush=True)
@@ -1094,8 +1141,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     envelope,
                     timeout=args.reply_timeout,
                 )
-                print(f"turn={turn_id}")
-                print(f"\nreply <- {session.tty_path}\n{reply}")
+                render_returned_reply(
+                    session,
+                    reply,
+                    task_id=task_id,
+                    turn_id=turn_id,
+                    visible=args.visible,
+                )
         return 0
     except SendError as exc:
         print(f"po send stopped: {exc}", file=sys.stderr)

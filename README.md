@@ -296,7 +296,10 @@ po crosscheck pts/2 /tmp/primary-answer.txt "Was the original request satisfied?
 
 The Termux-only sender visibly types each message and presses Enter by default,
 so George can watch the handoff in the receiving session. `--instant` keeps the
-same delivery and reply tracking but injects the message as one fast block. The
+same delivery and reply tracking but injects the message as one fast block. When
+the matching answer returns, the sending session displays the peer as "typing
+back," renders the complete answer character by character, and ends with a
+receipt containing the task ID and exact Codex turn ID. The
 sender queues behind the target's active turn by default,
 locks each target so two senders cannot interleave, assigns every message a
 task ID, and accepts only the matching Codex turn's completion. It duplicates

@@ -1,5 +1,6 @@
 import importlib.util
 import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -103,6 +104,29 @@ class TermuxSendTests(unittest.TestCase):
         )
         self.assertEqual(writes, [b"hello", b"\r"])
         self.assertEqual(sleeps, [TERMUX_SEND.SUBMIT_DELAY])
+
+    def test_returned_reply_types_back_and_ends_with_exact_receipt(self):
+        stream = io.StringIO()
+        sleeps = []
+        session = TERMUX_SEND.CodexSession(pid=200, tty_index=6)
+        TERMUX_SEND.render_returned_reply(
+            session,
+            "Peer answer.",
+            task_id="PO_20260803T120000_A1B2C3",
+            turn_id="turn-7",
+            visible=True,
+            char_delay=0.01,
+            stream=stream,
+            sleeper=sleeps.append,
+        )
+        self.assertEqual(
+            stream.getvalue(),
+            "\npts/6 is typing back (reply)...\n"
+            "Peer answer.\n"
+            "[received: task=PO_20260803T120000_A1B2C3 "
+            "turn=turn-7 from=pts/6 phase=reply]\n",
+        )
+        self.assertEqual(sleeps, [0.01] * len("Peer answer."))
 
     def test_wait_for_reply_correlates_visible_request_and_returns_final_answer(self):
         request = "Check the build\n— Sent from Codex conversation pts/1"
