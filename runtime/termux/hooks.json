@@ -1,5 +1,5 @@
 {
-  "description": "Reinject George's core interaction contract on every user prompt.",
+  "description": "Keep George's core contract loaded and add a blind English read-back of completed tool work.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -9,6 +9,31 @@
             "command": "/data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.codex/hooks/george-core-contract.py",
             "timeout": 5,
             "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.codex/hooks/code-readback.py",
+            "timeout": 5,
+            "statusMessage": "Saving the real build facts"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.codex/hooks/code-readback.py",
+            "timeout": 180,
+            "statusMessage": "Translating the finished feed into English"
           }
         ]
       }

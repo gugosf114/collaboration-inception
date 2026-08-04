@@ -60,9 +60,11 @@ class CodexPreferenceHookTests(unittest.TestCase):
             config = tomllib.load(config_file)
         self.assertEqual(config["developer_instructions"].strip(), context)
 
-    def test_global_hook_config_loads_only_the_clean_prompt_hook(self):
+    def test_global_hook_config_keeps_the_clean_prompt_hook(self):
         config = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
-        self.assertEqual(set(config["hooks"]), {"UserPromptSubmit"})
+        self.assertEqual(
+            set(config["hooks"]), {"UserPromptSubmit", "PostToolUse", "Stop"}
+        )
         handlers = config["hooks"]["UserPromptSubmit"][0]["hooks"]
         self.assertEqual(len(handlers), 1)
         self.assertIn("george-core-contract.py", handlers[0]["command"])
