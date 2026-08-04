@@ -23,7 +23,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 SYS_PIDFD_OPEN = 434
@@ -336,6 +336,70 @@ def _screen_state(client: AgentBridgeMCP) -> str:
     return client.call("android_get_screen_state", {})
 
 
+def _wait_for_screen_state(
+    client: AgentBridgeMCP,
+    predicate: Callable[[str], bool],
+    *,
+    timeout: float = 3.0,
+    poll_interval: float = 0.05,
+) -> str:
+    deadline = time.monotonic() + timeout
+    last_screen = ""
+    last_error: SendError | None = None
+    while True:
+        try:
+            screen = _screen_state(client)
+            last_screen = screen
+            last_error = None
+        except SendError as exc:
+            screen = ""
+            last_error = exc
+        if screen and predicate(screen):
+            return screen
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if last_screen:
+                return last_screen
+            if last_error is not None:
+                raise last_error
+            return ""
+        time.sleep(min(poll_interval, remaining))
+
+
+def _open_termux_drawer(
+    client: AgentBridgeMCP,
+    screen: str,
+    *,
+    attempts: int = 2,
+) -> str:
+    """Open Termux's drawer, retrying a gesture that the terminal may consume."""
+
+    current = screen
+    size_match = re.search(r"^screen:(\d+)x(\d+)", current, re.MULTILINE)
+    if size_match is None:
+        raise SendError("Agent Bridge did not report the phone screen size")
+    width, height = map(int, size_match.groups())
+    for _attempt in range(attempts):
+        if "com.termux:id/left_drawer" in current:
+            return current
+        client.call(
+            "android_swipe",
+            {
+                "x1": max(2, width // 100),
+                "y1": height * 2 // 5,
+                "x2": width * 4 // 5,
+                "y2": height * 2 // 5,
+                "duration": 350,
+            },
+        )
+        client.call("android_wait_for_idle", {"timeout": 3000})
+        current = _wait_for_screen_state(
+            client,
+            lambda state: "com.termux:id/left_drawer" in state,
+        )
+    return current
+
+
 def _focused_application_package(screen: str) -> str | None:
     match = re.search(
         r"^--- window:.*\btype:APPLICATION\s+pkg:([^\s]+).*\bfocused:true\s+---$",
@@ -356,6 +420,33 @@ def _drawer_session_node(screen: str, position: int) -> dict[str, str] | None:
     return None
 
 
+def _wait_for_drawer_session_node(
+    client: AgentBridgeMCP,
+    position: int,
+    *,
+    matches: Callable[[dict[str, str]], bool] | None = None,
+    timeout: float = 3.0,
+) -> tuple[str, dict[str, str] | None]:
+    try:
+        client.call(
+            "android_wait_for_node",
+            {
+                "by": "resource_id",
+                "value": "com.termux:id/session_title",
+                "timeout": max(1, int(timeout * 1000)),
+            },
+        )
+    except SendError:
+        pass
+
+    def wanted(screen: str) -> bool:
+        node = _drawer_session_node(screen, position)
+        return node is not None and (matches is None or matches(node))
+
+    screen = _wait_for_screen_state(client, wanted, timeout=timeout)
+    return screen, _drawer_session_node(screen, position)
+
+
 def _dialog_node(
     screen: str,
     *,
@@ -373,17 +464,134 @@ def _dialog_node(
     return None
 
 
-def _restore_termux_terminal(client: AgentBridgeMCP, screen: str) -> None:
+def _set_dialog_title(
+    client: AgentBridgeMCP,
+    screen: str,
+    title: str,
+    *,
+    attempts: int = 5,
+) -> str:
     current = screen
-    for _attempt in range(3):
-        if (
-            "title:Set session name" not in current
-            and "type:INPUT_METHOD" not in current
-            and "com.termux:id/left_drawer" not in current
-        ):
+    for attempt in range(attempts):
+        field = _dialog_node(current, class_name="EditText")
+        if field is None:
+            current = _wait_for_screen_state(
+                client,
+                lambda state: _dialog_node(state, class_name="EditText") is not None,
+            )
+            field = _dialog_node(current, class_name="EditText")
+        if field is None:
+            raise SendError("Termux session-name field was not found")
+        if field["text"] == title:
+            return current
+
+        stale_node_id = field["node_id"]
+        common = {
+            "node_id": stale_node_id,
+            "typing_speed": 10,
+            "typing_speed_variance": 0,
+        }
+        if field["text"] in {"", "-"}:
+            tool = "android_type_append_text"
+            arguments = {**common, "text": title}
+        else:
+            tool = "android_type_replace_text"
+            arguments = {
+                **common,
+                "search": field["text"],
+                "new_text": title,
+            }
+        try:
+            client.call(tool, arguments)
+        except SendError as exc:
+            if "not found" not in str(exc).casefold() or attempt == attempts - 1:
+                raise
+            current = _wait_for_screen_state(
+                client,
+                lambda state: (
+                    (fresh := _dialog_node(state, class_name="EditText")) is not None
+                    and fresh["node_id"] != stale_node_id
+                ),
+            )
+            continue
+
+        current = _wait_for_screen_state(
+            client,
+            lambda state: (
+                (fresh := _dialog_node(state, class_name="EditText")) is not None
+                and fresh["text"] == title
+                and _dialog_node(state, text="SET") is not None
+            ),
+        )
+        field = _dialog_node(current, class_name="EditText")
+        if field is not None and field["text"] == title:
+            return current
+    raise SendError("Termux session-name field did not accept the new name")
+
+
+def _restore_termux_terminal(
+    client: AgentBridgeMCP,
+    screen: str,
+    *,
+    original_screen: str | None = None,
+) -> None:
+    current = screen
+    original = original_screen or ""
+
+    if "title:Set session name" in current:
+        current = _wait_for_screen_state(
+            client,
+            lambda state: (
+                "title:Set session name" not in state
+                or _dialog_node(state, text="CANCEL") is not None
+            ),
+        )
+        if "title:Set session name" in current:
+            cancel = _dialog_node(current, text="CANCEL")
+            try:
+                if cancel is None:
+                    raise SendError("Termux session-name CANCEL button was not found")
+                client.call("android_click_node", {"node_id": cancel["node_id"]})
+            except SendError:
+                client.call("android_press_back", {})
+        current = _wait_for_screen_state(
+            client,
+            lambda state: "title:Set session name" not in state,
+        )
+        if "title:Set session name" in current:
             return
+
+    if "type:INPUT_METHOD" in current and "type:INPUT_METHOD" not in original:
         client.call("android_press_back", {})
-        current = _screen_state(client)
+        current = _wait_for_screen_state(
+            client,
+            lambda state: "type:INPUT_METHOD" not in state,
+        )
+        if "type:INPUT_METHOD" in current:
+            return
+
+    if (
+        "com.termux:id/left_drawer" in current
+        and "com.termux:id/left_drawer" not in original
+    ):
+        size_match = re.search(r"^screen:(\d+)x(\d+)", current, re.MULTILINE)
+        if size_match is None:
+            return
+        width, height = map(int, size_match.groups())
+        client.call(
+            "android_swipe",
+            {
+                "x1": width * 3 // 5,
+                "y1": height * 2 // 5,
+                "x2": max(2, width // 100),
+                "y2": height * 2 // 5,
+                "duration": 350,
+            },
+        )
+        _wait_for_screen_state(
+            client,
+            lambda state: "com.termux:id/left_drawer" not in state,
+        )
 
 
 def rename_termux_app_session(
@@ -397,41 +605,46 @@ def rename_termux_app_session(
 
     position = termux_session_position(session, session_numbers)
     bridge = client or AgentBridgeMCP()
-    screen = _screen_state(bridge)
+    screen = _wait_for_screen_state(
+        bridge,
+        lambda state: _focused_application_package(state) is not None,
+    )
+    original_screen = screen
     original_package = _focused_application_package(screen)
     if original_package != "com.termux":
         bridge.call("android_open_app", {"package_id": "com.termux"})
         bridge.call("android_wait_for_idle", {"timeout": 3000})
-        screen = _screen_state(bridge)
+        screen = _wait_for_screen_state(
+            bridge,
+            lambda state: _focused_application_package(state) == "com.termux",
+        )
         if _focused_application_package(screen) != "com.termux":
             raise SendError("Agent Bridge could not bring Termux to the foreground")
 
     final_screen = screen
     try:
+        screen = _open_termux_drawer(bridge, screen)
+        final_screen = screen
         if "com.termux:id/left_drawer" not in screen:
-            size_match = re.search(r"^screen:(\d+)x(\d+)", screen, re.MULTILINE)
-            if size_match is None:
-                raise SendError("Agent Bridge did not report the phone screen size")
-            width, height = map(int, size_match.groups())
-            bridge.call(
-                "android_swipe",
-                {
-                    "x1": max(2, width // 100),
-                    "y1": height * 2 // 5,
-                    "x2": width * 4 // 5,
-                    "y2": height * 2 // 5,
-                    "duration": 350,
-                },
-            )
-            bridge.call("android_wait_for_idle", {"timeout": 3000})
-            screen = _screen_state(bridge)
-            final_screen = screen
+            raise SendError("Agent Bridge could not open the Termux session drawer")
 
         for attempt in range(2):
-            session_node = _drawer_session_node(screen, position)
+            screen, session_node = _wait_for_drawer_session_node(
+                bridge, position
+            )
+            final_screen = screen
             if session_node is None:
+                visible_rows = [
+                    node["text"]
+                    for node in _screen_nodes(screen)
+                    if node["resource_id"] == "com.termux:id/session_title"
+                ]
+                row_details = (
+                    f"; visible rows: {visible_rows!r}" if visible_rows else ""
+                )
                 raise SendError(
-                    f"Termux drawer row [{position}] for {session.tty_path} was not found"
+                    f"Termux drawer row [{position}] for {session.tty_path} "
+                    f"was not found{row_details}"
                 )
             try:
                 bridge.call(
@@ -441,37 +654,34 @@ def rename_termux_app_session(
             except SendError:
                 if attempt == 1:
                     raise
-                screen = _screen_state(bridge)
-                final_screen = screen
         bridge.call(
             "android_wait_for_node",
             {"by": "text", "value": "Set session name", "timeout": 3000},
         )
-        screen = _screen_state(bridge)
+        screen = _wait_for_screen_state(
+            bridge,
+            lambda state: _dialog_node(state, class_name="EditText") is not None,
+        )
         final_screen = screen
         edit = _dialog_node(screen, class_name="EditText")
         if edit is None:
             raise SendError("Termux session-name field was not found")
-        bridge.call("android_type_clear_text", {"node_id": edit["node_id"]})
-        bridge.call(
-            "android_type_append_text",
-            {
-                "node_id": edit["node_id"],
-                "text": title,
-                "typing_speed": 10,
-                "typing_speed_variance": 0,
-            },
-        )
-        screen = _screen_state(bridge)
+        screen = _set_dialog_title(bridge, screen, title)
         final_screen = screen
         confirm = _dialog_node(screen, text="SET")
         if confirm is None:
             raise SendError("Termux session-name SET button was not found")
         bridge.call("android_click_node", {"node_id": confirm["node_id"]})
         bridge.call("android_wait_for_idle", {"timeout": 3000})
-        final_screen = _screen_state(bridge)
-        renamed = _drawer_session_node(final_screen, position)
         expected = f"[{position}] {title}"
+        final_screen, renamed = _wait_for_drawer_session_node(
+            bridge,
+            position,
+            matches=lambda node: (
+                node["text"] == expected
+                or node["text"].startswith(expected + " ")
+            ),
+        )
         if renamed is None or not (
             renamed["text"] == expected
             or renamed["text"].startswith(expected + " ")
@@ -481,7 +691,9 @@ def rename_termux_app_session(
             )
     finally:
         try:
-            _restore_termux_terminal(bridge, final_screen)
+            _restore_termux_terminal(
+                bridge, final_screen, original_screen=original_screen
+            )
         except SendError:
             pass
         if original_package and original_package != "com.termux":

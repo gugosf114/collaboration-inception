@@ -276,6 +276,62 @@ class TermuxSendTests(unittest.TestCase):
             TERMUX_SEND.termux_session_position(session, [47, 41, 46]), 2
         )
 
+    def test_screen_state_wait_retries_a_transient_empty_window_failure(self):
+        ready = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+"""
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = 0
+
+            def call(self, tool, arguments=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TERMUX_SEND.SendError("No windows available")
+                return ready
+
+        bridge = FakeBridge()
+        screen = TERMUX_SEND._wait_for_screen_state(
+            bridge,
+            lambda state: "pkg:com.termux" in state,
+            timeout=0.1,
+            poll_interval=0,
+        )
+        self.assertEqual(screen, ready)
+        self.assertEqual(bridge.calls, 2)
+
+    def test_open_termux_drawer_retries_a_consumed_gesture(self):
+        normal = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_terminal\tView\t-\t-\tcom.termux:id/terminal_view\t0,0,1080,2200\ton,ena
+"""
+        drawer = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,2200\ton,ena
+"""
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, tool, arguments=None):
+                self.calls.append((tool, arguments or {}))
+                return "ok"
+
+        bridge = FakeBridge()
+        with mock.patch.object(
+            TERMUX_SEND,
+            "_wait_for_screen_state",
+            side_effect=[normal, drawer],
+        ):
+            screen = TERMUX_SEND._open_termux_drawer(bridge, normal)
+        self.assertEqual(screen, drawer)
+        self.assertEqual(
+            [tool for tool, _arguments in bridge.calls].count("android_swipe"),
+            2,
+        )
+
     def test_real_termux_name_is_set_and_read_back_through_the_drawer(self):
         normal = """screen:1080x2520
 --- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
@@ -288,13 +344,20 @@ node_first\tTextView\t[1] home\t-\tcom.termux:id/session_title\t0,200,700,400\to
 node_second\tTextView\t[2] home\t-\tcom.termux:id/session_title\t0,400,700,600\ton,lclk,ena
 node_third\tTextView\t[3] home\t-\tcom.termux:id/session_title\t0,600,700,800\ton,lclk,ena
 """
+        empty_drawer = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,2200\ton,ena
+"""
         dialog = """screen:1080x2520
 --- window:2 type:APPLICATION pkg:com.termux title:Set session name layer:0 focused:true ---
-node_edit\tEditText\thome\t-\t-\t100,700,900,850\ton,edt,ena
+node_edit_old\tEditText\thome\t-\t-\t100,700,900,850\ton,edt,ena
 node_cancel\tButton\tCANCEL\t-\tandroid:id/button2\t600,900,780,1020\ton,clk,ena
 node_set_old\tButton\tSET\t-\tandroid:id/button1\t780,900,980,1020\ton,clk,ena
 """
-        typed_dialog = dialog.replace("node_set_old", "node_set_new").replace(
+        fresh_dialog = dialog.replace("node_edit_old", "node_edit_fresh")
+        typed_dialog = fresh_dialog.replace(
+            "node_edit_fresh", "node_edit_typed"
+        ).replace("node_set_old", "node_set_new").replace(
             "\tEditText\thome\t", "\tEditText\tLinkedIn Applications\t"
         )
         renamed = """screen:1080x2520
@@ -315,8 +378,10 @@ node_second_done\tTextView\t[2] LinkedIn Applications home\t-\tcom.termux:id/ses
                 self.screens = iter(
                     [
                         normal,
+                        empty_drawer,
                         drawer,
                         dialog,
+                        fresh_dialog,
                         typed_dialog,
                         renamed,
                         clean_drawer,
@@ -329,6 +394,13 @@ node_second_done\tTextView\t[2] LinkedIn Applications home\t-\tcom.termux:id/ses
                 self.calls.append((tool, arguments or {}))
                 if tool == "android_get_screen_state":
                     return next(self.screens)
+                if (
+                    tool == "android_type_replace_text"
+                    and arguments.get("node_id") != "node_edit_fresh"
+                ):
+                    raise TERMUX_SEND.SendError(
+                        "Node 'node_edit_old' not found in accessibility tree"
+                    )
                 return "ok"
 
         bridge = FakeBridge()
@@ -351,10 +423,90 @@ node_second_done\tTextView\t[2] LinkedIn Applications home\t-\tcom.termux:id/ses
         self.assertIn(
             ("android_click_node", {"node_id": "node_set_new"}), bridge.calls
         )
+        self.assertIn(
+            (
+                "android_type_replace_text",
+                {
+                    "node_id": "node_edit_fresh",
+                    "search": "home",
+                    "new_text": "LinkedIn Applications",
+                    "typing_speed": 10,
+                    "typing_speed_variance": 0,
+                },
+            ),
+            bridge.calls,
+        )
         self.assertEqual(
             [tool for tool, _arguments in bridge.calls].count("android_press_back"),
+            1,
+        )
+        self.assertEqual(
+            [tool for tool, _arguments in bridge.calls].count("android_swipe"),
             2,
         )
+
+    def test_restore_waits_for_stale_overlays_without_backing_out_of_termux(self):
+        overlaid = """screen:1080x2520
+--- window:2 type:INPUT_METHOD pkg:keyboard title:Keyboard layer:1 focused:false ---
+node_keyboard\tView\t-\t-\t-\t0,1500,1080,2520\ton,ena
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,1400\ton,ena
+"""
+        drawer = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,1400\ton,ena
+"""
+        normal = """screen:1080x2520
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_terminal\tView\t-\t-\tcom.termux:id/terminal_view\t0,0,1080,2200\ton,ena
+"""
+
+        class FakeBridge:
+            def __init__(self):
+                self.screens = iter([overlaid, drawer, drawer, normal])
+                self.calls = []
+
+            def call(self, tool, arguments=None):
+                self.calls.append((tool, arguments or {}))
+                if tool == "android_get_screen_state":
+                    return next(self.screens)
+                return "ok"
+
+        bridge = FakeBridge()
+        TERMUX_SEND._restore_termux_terminal(bridge, overlaid)
+        tools = [tool for tool, _arguments in bridge.calls]
+        self.assertEqual(tools.count("android_press_back"), 1)
+        self.assertEqual(tools.count("android_swipe"), 1)
+
+    def test_restore_preserves_a_keyboard_that_was_already_open(self):
+        original = """screen:1080x2520
+--- window:2 type:INPUT_METHOD pkg:keyboard title:Keyboard layer:1 focused:false ---
+node_keyboard\tView\t-\t-\t-\t0,1500,1080,2520\ton,ena
+--- window:1 type:APPLICATION pkg:com.termux title:Termux layer:0 focused:true ---
+node_terminal\tView\t-\t-\tcom.termux:id/terminal_view\t0,0,1080,1500\ton,ena
+"""
+        renamed = original.replace(
+            "node_terminal\tView\t-\t-\tcom.termux:id/terminal_view\t0,0,1080,1500\ton,ena\n",
+            "node_drawer\tLinearLayout\t-\t-\tcom.termux:id/left_drawer\t0,0,700,1400\ton,ena\n",
+        )
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, tool, arguments=None):
+                self.calls.append((tool, arguments or {}))
+                if tool == "android_get_screen_state":
+                    return original
+                return "ok"
+
+        bridge = FakeBridge()
+        TERMUX_SEND._restore_termux_terminal(
+            bridge, renamed, original_screen=original
+        )
+        tools = [tool for tool, _arguments in bridge.calls]
+        self.assertEqual(tools.count("android_press_back"), 0)
+        self.assertEqual(tools.count("android_swipe"), 1)
 
     def test_native_rename_failure_does_not_create_a_registry_record(self):
         session = TERMUX_SEND.CodexSession(pid=100, tty_index=1)
