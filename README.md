@@ -96,6 +96,15 @@ back, and only then registers it for routing. Missing, differently capitalized,
 and stale names are rejected instead of guessed. Side branches do not rename
 the session; only a real change in its primary work does.
 
+Termux Codex also keeps the normal tool and build feed, then adds an **ENGLISH
+READ-BACK — BLIND** block when a work turn ends. A `PostToolUse` hook records
+only the real shell and file-edit events. A `Stop` hook gives those numbered
+events to an isolated Luna translator that cannot see the user's request, the
+coding model's plan, or its final claims. Every English sentence points back to
+an event such as `[E1]`. A deterministic checker marks skipped, truncated, and
+hidden-failure events as `UNTRANSLATED` or `CHECK RAW`. Exact local receipts
+live under `~/.codex/code-readback/receipts/`.
+
 ## Add the Chrome side panel
 
 The terminal cockpit works by itself. The side panel adds the live channel,
