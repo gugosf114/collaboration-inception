@@ -1,0 +1,31 @@
+{
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.claude/hooks/george-core-contract.py",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/data/data/com.termux/files/usr/bin/bash /data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.claude/hooks/answer-length.sh",
+          "timeout": 15,
+          "statusMessage": "Answer length check"
+        },
+        {
+          "type": "command",
+          "command": "/data/data/com.termux/files/usr/bin/bash /data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs/root/.claude/hooks/plain-words.sh",
+          "timeout": 15,
+          "statusMessage": "Plain words check"
+        }
+      ]
+    }
+  ]
+}

@@ -8,7 +8,7 @@
             "type": "command",
             "command": "/data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.codex/hooks/george-core-contract.py",
             "timeout": 5,
-            "additionalContextLimit": 1000
+            "additionalContextLimit": 2500
           }
         ]
       }
